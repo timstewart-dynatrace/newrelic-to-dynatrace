@@ -1,0 +1,14 @@
+{
+  "project": "newrelic-to-dynatrace",
+  "version": "1.0.0",
+  "description": "DMA New Relic export scripts — Bash and PowerShell tools for NerdGraph API extraction",
+  "type": "shell-scripts",
+  "team": "Enterprise Solutions & Architecture",
+  "division": "ACE Services, Dynatrace One",
+  "related_projects": [
+    "dynabridge-for-newrelic",
+    "dma-nrql-translator",
+    "dma-newrelic-converter",
+    "dma-newrelic-app"
+  ]
+}
