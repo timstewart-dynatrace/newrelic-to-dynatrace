@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.0.0
+#  DMA New Relic Export Script v1.0.1
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -89,7 +89,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -161,31 +161,34 @@ print_header() {
     echo ""
 }
 
+# All log_* functions write screen output to stderr so that helper
+# functions like nerdgraph_query (called via $()) don't have log lines
+# captured into the JSON payload returned to the caller.
 log_info()  {
     local msg="[$(date -u +"%H:%M:%S")] [INFO]  $*"
     echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-    print_color "$BLUE" "  ℹ $*"
+    print_color "$BLUE" "  ℹ $*" >&2
 }
 log_ok()    {
     local msg="[$(date -u +"%H:%M:%S")] [OK]    $*"
     echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-    print_color "$GREEN" "  ✓ $*"
+    print_color "$GREEN" "  ✓ $*" >&2
 }
 log_warn()  {
     local msg="[$(date -u +"%H:%M:%S")] [WARN]  $*"
     echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-    print_color "$YELLOW" "  ⚠ $*"
+    print_color "$YELLOW" "  ⚠ $*" >&2
 }
 log_error() {
     local msg="[$(date -u +"%H:%M:%S")] [ERROR] $*"
     echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-    print_color "$RED" "  ✗ $*"
+    print_color "$RED" "  ✗ $*" >&2
 }
 log_debug() {
     if [[ "$DEBUG" == "true" ]]; then
         local msg="[$(date -u +"%H:%M:%S")] [DEBUG] $*"
         echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-        print_color "$GRAY" "    [DEBUG] $*"
+        print_color "$GRAY" "    [DEBUG] $*" >&2
     fi
 }
 

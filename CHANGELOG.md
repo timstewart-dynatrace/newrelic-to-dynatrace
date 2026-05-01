@@ -1,31 +1,61 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2026-04-22
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [1.0.1] - 2026-04-22
+
+### Fixed
+
+- **NerdGraph `entitySearch` schema compatibility** — `entitySearch.results.entities` returns `*EntityOutline` types, not the full entity types. Spreading `... on DashboardEntity`/`SyntheticMonitorEntity`/`WorkloadEntity` against the outline union silently returned no fields. Reworked dashboard, synthetic monitor, workload, and service-level indicator exports into a two-phase fetch: `entitySearch` enumerates GUIDs, then `actor.entities(guids:)` (batched at 25 per call) retrieves full details.
+- **Service level indicators now discoverable** — SLIs live on `Entity.serviceLevel.indicators`, not on `Account.serviceLevel`. Rewrote the SLI export to probe all entities in an account and collect any that expose an SLI.
+- **RBAC export failing with "filter required"** — `customerAdministration.users` now requires `filter: { authenticationDomainId: { eq: ... } }` and `customerAdministration.groups` requires `filter: { organizationId: { eq: ... } }`. Response collection renamed from `users`/`groups` to `items`. Script now discovers the organization id and iterates auth domains before fetching users.
+- **Alert NRQL condition query schema** — removed interface-level queries for `terms`/`signal`/`valueFunction`/`violationTimeLimitSeconds` that are only valid on concrete `AlertsNrqlStaticCondition`/`AlertsNrqlBaselineCondition` types. Query now reads only `AlertsNrqlCondition` interface fields; concrete-type detail can be added once each type's schema is verified against live NerdGraph.
+- **Empty GraphQL argument lists rejected** — `policiesSearch()` and `nrqlConditionsSearch()` with empty parens returned parse errors. First-page calls now omit the parens entirely.
+- **`head -n -N` incompatible with macOS/BSD coreutils** — HTTP response splitting in `nerdgraph_query` replaced `head -n -1` with `sed '$d'` so the Bash script works on macOS.
+- **`log_info` and `log_debug` polluting stdout** — helper functions that are invoked inside `$(...)` captures were writing logs to stdout, which got captured into JSON strings. All log functions now route to stderr.
+- **Staging directory deleted before final log lines** — `rm -rf "$OUTPUT_DIR"` moved from `create_archive` to the tail of `main()` so completion logging runs before cleanup.
+- **PowerShell strict-mode property access errors** — `$response.errors` now probed via `psobject.Properties['errors']` before read; `$_.Exception.Response?.StatusCode?.value__` replaced with a `try/catch` cast for PowerShell 5.1 compatibility.
+- **PowerShell `$AccountIdList` collapsing to scalar** — forced array context with `@(...)` around the split so a single comma-less account value doesn't break `.Count` under `Set-StrictMode`.
+- **PowerShell JSON serialization of single-item arrays** — `Save-Json` now normalizes empty/single/multi-item collections explicitly (using `-AsArray` for single items) so PowerShell and Bash archives stay byte-compatible.
 
 ### Added
-- `dma-newrelic-export.sh` — Bash export script (Linux/macOS/WSL)
-- `dma-newrelic-export.ps1` — PowerShell export script (Windows/cross-platform)
-- Exports: dashboards, alert policies, NRQL conditions, notification channels
-- Exports: synthetic monitors, workloads, service level indicators
-- Optional exports: RBAC (users/groups), usage analytics
-- Manifest generation (`manifest.json`) with per-account statistics
-- Summary generation (`dma-env-summary.md`) with migration mapping reference
-- Anonymized archive support (`--anonymize`) via SHA-256 field masking
-- jq-based JSON processing (consistent with DMA DataDog export tooling)
-- CRLF auto-detection and fix (Windows line ending safety)
-- Pre-flight checklist in script header
-- NerdGraph two-phase GUID discovery + batch entity fetch pattern
-- Support for US and EU API regions
-- Auto-discover accounts when `--accounts` is omitted
-- Retry with exponential backoff (3 attempts, 2s/4s delays)
-- 50ms inter-page delay to respect NerdGraph rate limits
 
-### Notes
-- Supersedes `dynabridge-for-newrelic` — same NerdGraph API coverage, DMA naming conventions
-- Archive name changed to `dma_export_newrelic_YYYYMMDDTHHMMSSZ.tar.gz`
-- JSON processing migrated from `python3` inline scripts to `jq` (no Python dependency)
-- Service levels now use the `actor.account.serviceLevel.indicators` query (more efficient than entity scan)
+- `ENTITY_FETCH_BATCH` / `$EntityFetchBatch` constant (25) — documented batch size for `actor.entities(guids:)` calls.
+
+## [1.0.0] - 2026-04-21
+
+### Added
+- Initial release of DMA New Relic Export tool
+- Bash export script (`dma-newrelic-export.sh`) for Linux/macOS
+- PowerShell export script (`dma-newrelic-export.ps1`) for Windows and cross-platform
+- NerdGraph (GraphQL) API integration with cursor-based pagination
+- Dashboard export including widget definitions, NRQL queries, and layout
+- Alert policy and NRQL condition export with full threshold and signal configuration
+- Notification destinations, channels, and AI workflow export
+- Synthetic monitor export (browser and scripted API monitors)
+- Workload export with entity scope and account relationships
+- Service level indicator/objective export
+- User and group (RBAC) export via `customerAdministration` API (opt-in)
+- Usage analytics generation via NRQL audit queries (opt-in):
+  - `dashboard_views_top100.json` — Top viewed dashboards (90 days)
+  - `alerts_most_fired.json` — Most fired alert conditions (90 days)
+  - `users_most_active.json` — Most active users (90 days)
+  - `ingest_by_data_type.json` — Data ingestion by event type (30 days)
+- US and EU region support
+- Automatic account discovery when no `--accounts` specified
+- Retry logic with exponential backoff for API failures
+- 50ms rate limiting between paginated requests
+- `manifest.json` generation with per-account export statistics
+- Human-readable `dma-env-summary.md` with migration guidance
+- `--anonymize` flag for producing a second SHA-256-masked export archive
+- `--debug` verbose logging mode
+- Schema version 1.0 export archive format
+- Full documentation suite:
+  - `docs_markdown/README-NEWRELIC.md` — Setup guide and prerequisites
+  - `docs_markdown/EXPORT-SCHEMA.md` — Archive format specification
+  - `docs_markdown/SCRIPT-GENERATED-ANALYTICS-REFERENCE.md` — Analytics files reference

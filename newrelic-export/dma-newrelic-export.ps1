@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.0
+    DMA New Relic Export Script v1.0.1
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.0"
+$ScriptVersion    = "1.0.1"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
