@@ -88,7 +88,9 @@ param(
     [switch]$Anonymize,
 
     [string]$OutputDir = "",
-    [switch]$DebugMode
+    [switch]$DebugMode,
+
+    [switch]$TestAccess
 )
 
 Set-StrictMode -Version Latest
@@ -122,9 +124,14 @@ if ([string]::IsNullOrEmpty($OutputDir)) {
     $OutputDir = Join-Path ([System.IO.Path]::GetTempPath()) "dma_newrelic_export_$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
 }
 
-$null = New-Item -ItemType Directory -Path (Join-Path $OutputDir "_systeminfo") -Force
-$LogFile = Join-Path $OutputDir "export.log"
-$null = New-Item -ItemType File -Path $LogFile -Force
+# Skip output dir / log file creation when running --TestAccess (pure permission probe).
+if (-not $TestAccess) {
+    $null = New-Item -ItemType Directory -Path (Join-Path $OutputDir "_systeminfo") -Force
+    $LogFile = Join-Path $OutputDir "export.log"
+    $null = New-Item -ItemType File -Path $LogFile -Force
+} else {
+    $LogFile = $null
+}
 
 $AccountIdList = @()
 if (-not [string]::IsNullOrEmpty($Accounts)) {
@@ -146,6 +153,179 @@ function Log-Ok    { param([string]$m) Write-Log "OK   " "  ✓ $m" }
 function Log-Warn  { param([string]$m) Write-Log "WARN " $m }
 function Log-Error { param([string]$m) Write-Log "ERROR" $m }
 function Log-Debug { param([string]$m) if ($DebugMode) { Write-Log "DEBUG" $m } }
+
+# =============================================================================
+# ACCESS TEST (--TestAccess pre-flight)
+# =============================================================================
+
+# Single-shot NerdGraph probe — no retries, short timeout. Returns @{ Code; Body; Error }.
+function Invoke-Probe {
+    param([string]$Query)
+    $body    = @{ query = $Query } | ConvertTo-Json -Compress -Depth 5
+    $headers = @{ "Content-Type" = "application/json"; "API-Key" = $ApiKey }
+    try {
+        $response = Invoke-RestMethod -Uri $GraphqlEndpoint -Method Post -Body $body -Headers $headers -TimeoutSec 15 -ErrorAction Stop
+        return [PSCustomObject]@{ Code = 200; Body = $response; Error = $null }
+    } catch {
+        $code = 0
+        try { $code = [int]($_.Exception.Response.StatusCode) } catch { $code = 0 }
+        return [PSCustomObject]@{ Code = $code; Body = $null; Error = $_.Exception.Message }
+    }
+}
+
+function Invoke-TestAccess {
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "  ║                       DMA New Relic Access Test                          ║" -ForegroundColor Cyan
+    Write-Host "  ╚══════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Testing API key permissions for: $GraphqlEndpoint" -ForegroundColor Cyan
+    Write-Host ""
+
+    $sep  = "  +----------------------------------+--------+----------------------------------+"
+    $rfmt = "  | {0,-32} | {1,-6} | {2,-32} |"
+
+    Write-Host $sep
+    Write-Host ($rfmt -f "CATEGORY", "RESULT", "NOTES")
+    Write-Host $sep
+
+    $counters = @{ Pass = 0; Warn = 0; Fail = 0; Skip = 0 }
+    $testAccountId = $null
+
+    # Closure-capable helper. Mutates $counters via hashtable reference.
+    $renderRow = {
+        param([string]$Label, [string]$Result, [string]$Notes)
+        $color = switch ($Result) {
+            "PASS" { "Green" }
+            "WARN" { "Yellow" }
+            "FAIL" { "Red" }
+            default { "DarkGray" }
+        }
+        Write-Host ($rfmt -f $Label, $Result, $Notes) -ForegroundColor $color
+        switch ($Result) {
+            "PASS" { $counters.Pass++ }
+            "WARN" { $counters.Warn++ }
+            "FAIL" { $counters.Fail++ }
+            "SKIP" { $counters.Skip++ }
+        }
+    }
+
+    $runTest = {
+        param([string]$Label, [string]$Query, [scriptblock]$CountExpr)
+
+        if ([string]::IsNullOrEmpty($Query)) {
+            & $renderRow $Label "SKIP" "Account discovery failed"
+            return
+        }
+
+        $r    = Invoke-Probe -Query $Query
+        $code = $r.Code
+        $body = $r.Body
+
+        if ($code -ne 200) {
+            $notes = switch ($code) {
+                401     { "Auth error (HTTP 401)" }
+                403     { "Auth error (HTTP 403)" }
+                0       { "No response - check network" }
+                default { "HTTP $code" }
+            }
+            & $renderRow $Label "FAIL" $notes
+            return
+        }
+
+        if ($body.psobject.Properties['errors'] -and $body.errors -and @($body.errors).Count -gt 0) {
+            $msg = [string]$body.errors[0].message
+            if ($msg.Length -gt 32) { $msg = $msg.Substring(0,32) }
+            & $renderRow $Label "FAIL" $msg
+            return
+        }
+
+        try {
+            $count = & $CountExpr $body
+            if ($count -gt 0) {
+                & $renderRow $Label "PASS" "$count item(s)"
+            } else {
+                & $renderRow $Label "WARN" "Reachable; no items found"
+            }
+        } catch {
+            & $renderRow $Label "FAIL" "Response parse error"
+        }
+    }
+
+    # 1. Credentials
+    & $runTest "Credentials (user info)" `
+        '{ actor { user { name email } } }' `
+        { param($b) if ($b.data.actor.user.psobject.Properties['name']) { 1 } else { 0 } }
+
+    # 2. Account discovery — capture first id for downstream tests
+    if ($AccountIdList.Count -gt 0) {
+        $testAccountId = $AccountIdList[0]
+    } else {
+        $r = Invoke-Probe -Query '{ actor { accounts { id } } }'
+        if ($r.Code -eq 200 -and $r.Body -and @($r.Body.data.actor.accounts).Count -gt 0) {
+            $testAccountId = $r.Body.data.actor.accounts[0].id
+        }
+    }
+    & $runTest "Account discovery" `
+        '{ actor { accounts { id name } } }' `
+        { param($b) @($b.data.actor.accounts).Count }
+
+    # 3. Organization
+    & $runTest "Organization (--Rbac prereq)" `
+        '{ actor { organization { id name } } }' `
+        { param($b) if ($b.data.actor.organization.psobject.Properties['id']) { 1 } else { 0 } }
+
+    # Per-account tests
+    if ($testAccountId) {
+        $aid = $testAccountId
+        & $runTest "Dashboards" `
+            "{ actor { entitySearch(query: `"type='DASHBOARD' AND accountId=$aid`") { count } } }" `
+            { param($b) [int]$b.data.actor.entitySearch.count }
+        & $runTest "Alert policies" `
+            "{ actor { account(id: $aid) { alerts { policiesSearch { policies { id } } } } } }" `
+            { param($b) @($b.data.actor.account.alerts.policiesSearch.policies).Count }
+        & $runTest "NRQL alert conditions" `
+            "{ actor { account(id: $aid) { alerts { nrqlConditionsSearch { nrqlConditions { id } } } } } }" `
+            { param($b) @($b.data.actor.account.alerts.nrqlConditionsSearch.nrqlConditions).Count }
+        & $runTest "Synthetic monitors" `
+            "{ actor { entitySearch(query: `"type='MONITOR' AND accountId=$aid`") { count } } }" `
+            { param($b) [int]$b.data.actor.entitySearch.count }
+        & $runTest "Workloads" `
+            "{ actor { entitySearch(query: `"type='WORKLOAD' AND accountId=$aid`") { count } } }" `
+            { param($b) [int]$b.data.actor.entitySearch.count }
+        & $runTest "NRQL queries (--Usage prereq)" `
+            "{ actor { account(id: $aid) { nrql(query: `"SELECT count(*) FROM Transaction SINCE 1 hour ago`") { results } } } }" `
+            { param($b) @($b.data.actor.account.nrql.results).Count }
+    } else {
+        @("Dashboards", "Alert policies", "NRQL alert conditions", "Synthetic monitors", "Workloads", "NRQL queries (--Usage prereq)") | ForEach-Object {
+            & $renderRow $_ "SKIP" "No account id available"
+        }
+    }
+
+    # RBAC
+    & $runTest "RBAC users (--Rbac prereq)" `
+        '{ actor { organization { authenticationDomains(filter: {}) { authenticationDomains { id } } } } }' `
+        { param($b) @($b.data.actor.organization.authenticationDomains.authenticationDomains).Count }
+
+    Write-Host $sep
+    Write-Host ("  | {0,-32}  PASS:{1,3}  WARN:{2,3}  FAIL:{3,3}  SKIP:{4,3} |" -f "SUMMARY", $counters.Pass, $counters.Warn, $counters.Fail, $counters.Skip)
+    Write-Host $sep
+    Write-Host ""
+
+    if ($counters.Fail -gt 0) {
+        Write-Host "  One or more categories FAILED. Fix permissions before running a full export." -ForegroundColor Red
+        Write-Host ""
+        return 1
+    } elseif ($counters.Warn -gt 0) {
+        Write-Host "  All categories reachable. WARN may indicate empty categories or missing optional scopes." -ForegroundColor Yellow
+        Write-Host ""
+        return 0
+    } else {
+        Write-Host "  All checks passed. Ready to run a full export." -ForegroundColor Green
+        Write-Host ""
+        return 0
+    }
+}
 
 # =============================================================================
 # API HELPERS
@@ -289,7 +469,7 @@ function Export-DashboardsForAccount {
         $pageGuids  = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor     = if ($results)  { $results.nextCursor } else { $null }
 
-        Log-Debug "    Page $page: $($pageGuids.Count) dashboard GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) dashboard GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -332,7 +512,7 @@ function Export-DashboardsForAccount {
         $batchEntities  = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchEntities.Count) dashboard details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchEntities.Count) dashboard details"
         $allEntities = Merge-Arrays $allEntities $batchEntities
         $start += $EntityFetchBatch
         $batchNum++
@@ -477,7 +657,7 @@ function Export-SyntheticsForAccount {
         $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
         $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor    = if ($results)  { $results.nextCursor } else { $null }
-        Log-Debug "    Page $page: $($pageGuids.Count) monitor GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) monitor GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -508,7 +688,7 @@ function Export-SyntheticsForAccount {
         $batchItems     = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchItems.Count) monitor details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) monitor details"
         $allMonitors = Merge-Arrays $allMonitors $batchItems
         $start += $EntityFetchBatch
         $batchNum++
@@ -552,7 +732,7 @@ function Export-WorkloadsForAccount {
         $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
         $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor    = if ($results)  { $results.nextCursor } else { $null }
-        Log-Debug "    Page $page: $($pageGuids.Count) workload GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) workload GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -582,7 +762,7 @@ function Export-WorkloadsForAccount {
         $batchItems     = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchItems.Count) workload details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) workload details"
         $allWorkloads = Merge-Arrays $allWorkloads $batchItems
         $start += $EntityFetchBatch
         $batchNum++
@@ -935,6 +1115,11 @@ function Create-Archive {
 # =============================================================================
 # MAIN
 # =============================================================================
+
+# --TestAccess: probe permissions only, write nothing, exit with PASS/FAIL code.
+if ($TestAccess) {
+    exit (Invoke-TestAccess)
+}
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
