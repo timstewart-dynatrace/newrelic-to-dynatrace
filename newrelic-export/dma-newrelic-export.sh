@@ -139,6 +139,7 @@ INCLUDE_RBAC=false
 INCLUDE_USAGE=false
 ANONYMIZE=false
 DEBUG=false
+TEST_ACCESS=false
 
 # =============================================================================
 # LOGGING
@@ -1275,6 +1276,173 @@ create_archive() {
 # CLI
 # =============================================================================
 
+# =============================================================================
+# ACCESS TEST (--test-access pre-flight)
+# =============================================================================
+
+# Probe NerdGraph with a single GraphQL query. Sets PROBE_CODE, PROBE_BODY.
+# Skips retry/backoff (this is a fast pre-flight; one shot per category).
+probe_nerdgraph() {
+    local query="$1"
+    local payload tmp
+    payload=$(jq -n --arg q "$query" '{"query": $q}')
+    tmp=$(mktemp)
+    PROBE_CODE=$(curl -s -o "$tmp" -w "%{http_code}" \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -H "API-Key: $API_KEY" \
+        --data "$payload" \
+        --max-time 15 \
+        "$GRAPHQL_ENDPOINT" 2>/dev/null)
+    PROBE_BODY=$(cat "$tmp")
+    rm -f "$tmp"
+}
+
+# Run all access checks, render a colored boxed table, exit 0 (clean) or 1 (failures).
+# Sets TEST_ACCOUNT_ID from the first account discovered (or --accounts) so
+# downstream per-account probes have a target.
+TEST_ACCOUNT_ID=""
+
+run_test_access() {
+    echo ""
+    print_header "DMA New Relic Access Test"
+    echo ""
+    print_color "$CYAN" "  Testing API key permissions for: $GRAPHQL_ENDPOINT"
+    echo ""
+
+    local sep="  +----------------------------------+--------+----------------------------------+"
+    local hfmt="  | %-32s | %-6s | %-32s |"
+    local rfmt="  | %-32s | %-6s | %-32s |"
+
+    echo "$sep"
+    printf "$hfmt\n" "CATEGORY" "RESULT" "NOTES"
+    echo "$sep"
+
+    local pass_count=0 warn_count=0 fail_count=0 skip_count=0
+
+    # Inline so it has access to the counters above (bash 3.2 has no nameref).
+    test_one() {
+        local label="$1" query="$2" jq_count="$3"
+        local result notes="" count
+
+        if [[ -z "$query" ]]; then
+            printf "${GRAY}${rfmt}${NC}\n" "$label" "SKIP" "Account discovery failed"
+            skip_count=$((skip_count + 1))
+            return
+        fi
+
+        probe_nerdgraph "$query"
+        local code="$PROBE_CODE" body="$PROBE_BODY"
+
+        if [[ "$code" != "200" ]]; then
+            result="FAIL"
+            case "$code" in
+                401|403)  notes="Auth error (HTTP $code) - check API key" ;;
+                000|"")   notes="No response - check network" ;;
+                *)        notes="Unexpected HTTP $code" ;;
+            esac
+        elif echo "$body" | jq -e '.errors and (.errors | length > 0)' >/dev/null 2>&1; then
+            result="FAIL"
+            notes=$(echo "$body" | jq -r '.errors[0].message' 2>/dev/null | cut -c1-32)
+        else
+            count=$(echo "$body" | jq -r "$jq_count" 2>/dev/null)
+            if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]; then
+                result="PASS"
+                notes="$count item(s)"
+            else
+                result="WARN"
+                notes="Reachable; no items found"
+            fi
+        fi
+
+        case "$result" in
+            PASS) printf "${GREEN}${rfmt}${NC}\n"  "$label" "PASS" "$notes"; pass_count=$((pass_count + 1)) ;;
+            WARN) printf "${YELLOW}${rfmt}${NC}\n" "$label" "WARN" "$notes"; warn_count=$((warn_count + 1)) ;;
+            FAIL) printf "${RED}${rfmt}${NC}\n"    "$label" "FAIL" "$notes"; fail_count=$((fail_count + 1)) ;;
+        esac
+    }
+
+    # 1. Credentials — does the key authenticate at all?
+    test_one "Credentials (user info)" \
+        '{ actor { user { name email } } }' \
+        'if .data.actor.user.name then 1 else 0 end'
+
+    # 2. Account discovery — capture an account id for downstream tests
+    if [[ ${#ACCOUNT_IDS[@]} -gt 0 ]]; then
+        TEST_ACCOUNT_ID="${ACCOUNT_IDS[0]}"
+    else
+        probe_nerdgraph '{ actor { accounts { id } } }'
+        if [[ "$PROBE_CODE" == "200" ]]; then
+            TEST_ACCOUNT_ID=$(echo "$PROBE_BODY" | jq -r '.data.actor.accounts[0].id // empty' 2>/dev/null)
+        fi
+    fi
+    test_one "Account discovery" \
+        '{ actor { accounts { id name } } }' \
+        '.data.actor.accounts | length'
+
+    # 3. Organization (required for RBAC paths)
+    test_one "Organization (RBAC prereq)" \
+        '{ actor { organization { id name } } }' \
+        'if .data.actor.organization.id then 1 else 0 end'
+
+    # Per-account tests — require an account id from step 2
+    local acct_query=""
+    if [[ -n "$TEST_ACCOUNT_ID" ]]; then
+        test_one "Dashboards" \
+            "{ actor { entitySearch(query: \"type='DASHBOARD' AND accountId=$TEST_ACCOUNT_ID\") { count } } }" \
+            '.data.actor.entitySearch.count'
+        test_one "Alert policies" \
+            "{ actor { account(id: $TEST_ACCOUNT_ID) { alerts { policiesSearch { policies { id } } } } } }" \
+            '.data.actor.account.alerts.policiesSearch.policies | length'
+        test_one "NRQL alert conditions" \
+            "{ actor { account(id: $TEST_ACCOUNT_ID) { alerts { nrqlConditionsSearch { nrqlConditions { id } } } } } }" \
+            '.data.actor.account.alerts.nrqlConditionsSearch.nrqlConditions | length'
+        test_one "Synthetic monitors" \
+            "{ actor { entitySearch(query: \"type='MONITOR' AND accountId=$TEST_ACCOUNT_ID\") { count } } }" \
+            '.data.actor.entitySearch.count'
+        test_one "Workloads" \
+            "{ actor { entitySearch(query: \"type='WORKLOAD' AND accountId=$TEST_ACCOUNT_ID\") { count } } }" \
+            '.data.actor.entitySearch.count'
+        test_one "NRQL queries (--usage prereq)" \
+            "{ actor { account(id: $TEST_ACCOUNT_ID) { nrql(query: \"SELECT count(*) FROM Transaction SINCE 1 hour ago\") { results } } } }" \
+            '.data.actor.account.nrql.results | length'
+    else
+        for label in "Dashboards" "Alert policies" "NRQL alert conditions" "Synthetic monitors" "Workloads" "NRQL queries (--usage prereq)"; do
+            printf "${GRAY}${rfmt}${NC}\n" "$label" "SKIP" "No account id available"
+            skip_count=$((skip_count + 1))
+        done
+    fi
+
+    # RBAC: customerAdministration is gated by an Authentication Domain Manager role.
+    test_one "RBAC users (--rbac prereq)" \
+        '{ actor { organization { authenticationDomains(filter: {}) { authenticationDomains { id } } } } }' \
+        '.data.actor.organization.authenticationDomains.authenticationDomains | length'
+
+    echo "$sep"
+    printf "  | %-32s ${GREEN}PASS:%3s${NC} ${YELLOW}WARN:%3s${NC} ${RED}FAIL:%3s${NC} ${GRAY}SKIP:%3s${NC} |\n" \
+           "SUMMARY" "$pass_count" "$warn_count" "$fail_count" "$skip_count"
+    echo "$sep"
+    echo ""
+
+    if [[ $fail_count -gt 0 ]]; then
+        print_color "$RED" "  One or more categories FAILED. Fix permissions before running a full export."
+        echo ""
+        return 1
+    elif [[ $warn_count -gt 0 ]]; then
+        print_color "$YELLOW" "  All categories reachable. WARN may indicate empty categories or missing optional scopes."
+        echo ""
+        return 0
+    else
+        print_color "$GREEN" "  All checks passed. Ready to run a full export."
+        echo ""
+        return 0
+    fi
+}
+
+# =============================================================================
+# COMMAND LINE INTERFACE
+# =============================================================================
+
 usage() {
     cat <<EOF
 ${BOLD}DMA New Relic Export Script v${SCRIPT_VERSION}${NC}
@@ -1300,6 +1468,9 @@ ${BOLD}EXPORT OPTIONS:${NC}
   --usage                 Generate usage analytics via NRQL audit queries (opt-in)
 
 ${BOLD}OTHER:${NC}
+  --test-access           Probe credentials and per-category permissions, print
+                          a PASS/WARN/FAIL/SKIP table, and exit. Writes no
+                          export files. Run this first on a new API key.
   --anonymize             Also produce a SHA-256 masked archive (for sharing)
   --output-dir DIR        Custom working directory (default: system temp)
   --debug                 Verbose logging
@@ -1349,6 +1520,7 @@ parse_args() {
             --anonymize)      ANONYMIZE=true; shift ;;
             --output-dir)     OUTPUT_DIR="$2"; shift 2 ;;
             --debug)          DEBUG=true; shift ;;
+            --test-access)    TEST_ACCESS=true; shift ;;
             --help|-h)        usage; exit 0 ;;
             *)                log_error "Unknown argument: $1"; echo ""; usage; exit 1 ;;
         esac
@@ -1414,6 +1586,23 @@ write_environment_info() {
 main() {
     parse_args "$@"
     check_prerequisites
+
+    # --test-access: probe permissions only. No output dir, no log file, no archive.
+    if [[ "$TEST_ACCESS" == "true" ]]; then
+        if [[ -z "$API_KEY" ]]; then
+            print_color "$RED" "ERROR: --api-key is required (even for --test-access)"
+            exit 1
+        fi
+        if [[ "$REGION" == "EU" ]]; then
+            GRAPHQL_ENDPOINT="$API_ENDPOINT_EU"
+        elif [[ "$REGION" != "US" ]]; then
+            print_color "$RED" "ERROR: --region must be US or EU (got: $REGION)"
+            exit 1
+        fi
+        run_test_access
+        exit $?
+    fi
+
     validate_args
 
     print_header "$SCRIPT_NAME v${SCRIPT_VERSION}"
