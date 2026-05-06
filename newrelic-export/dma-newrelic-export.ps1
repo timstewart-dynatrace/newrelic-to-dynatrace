@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.1
+    DMA New Relic Export Script v1.0.2
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.1"
+$ScriptVersion    = "1.0.2"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -810,11 +810,49 @@ function Generate-Manifest {
         }
     }
 
+    # Build files[] for converter consumers (relative paths under
+    # OutputDir; manifest.json itself excluded — it is about to be
+    # written; export.log excluded — appended throughout the run,
+    # metadata not migration content).
+    $filesList = @(
+        Get-ChildItem -Path $OutputDir -Recurse -File |
+            Where-Object { $_.Name -ne 'manifest.json' -and $_.Name -ne 'export.log' } |
+            ForEach-Object {
+                $rel = $_.FullName.Substring($OutputDir.Length).TrimStart('\','/')
+                $rel -replace '\\','/'
+            }
+    )
+
+    # Flatten per-account statistics into a single counts map for
+    # the @dma/newrelic-converter ManifestParser.
+    $counts = @{}
+    foreach ($aid in $AccountIdList) {
+        foreach ($k in $accountStats[$aid].Keys) {
+            $cur = if ($counts.ContainsKey($k)) { $counts[$k] } else { 0 }
+            $counts[$k] = $cur + $accountStats[$aid][$k]
+        }
+    }
+
+    # Annotate each account with its region (single-region per export).
+    $accountsWithRegion = @($AllAccounts | ForEach-Object {
+        $a = @{}
+        foreach ($p in $_.PSObject.Properties) { $a[$p.Name] = $p.Value }
+        $a['region'] = $Region
+        $a
+    })
+
+    # The DMA New Relic App's @dma/newrelic-converter ManifestParser
+    # expects: version, exportedAt, accounts[].region, counts (flat),
+    # files[]. Legacy fields (schema_version, export_timestamp,
+    # statistics) preserved so v1.0.1 schema readers still work —
+    # this manifest is a strict superset.
     $manifest = @{
         schema_version       = $SchemaVersion
+        version              = $SchemaVersion
         export_tool_version  = $ScriptVersion
         export_tool          = "dma-newrelic-export"
         export_timestamp     = $ScriptStartTime
+        exportedAt           = $ScriptStartTime
         export_end_timestamp = $exportEndTime
         export_duration_seconds = $duration
         source_system = @{
@@ -832,7 +870,9 @@ function Generate-Manifest {
             usage_analytics = [bool]$Usage
         }
         statistics = $accountStats
-        accounts   = $AllAccounts
+        counts     = $counts
+        accounts   = $accountsWithRegion
+        files      = $filesList
     }
 
     Save-Json -Data $manifest -Path (Join-Path $OutputDir "manifest.json")

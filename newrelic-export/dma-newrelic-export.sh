@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.0.1
+#  DMA New Relic Export Script v1.0.2
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -89,7 +89,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -1080,6 +1080,21 @@ generate_manifest() {
     local accounts_data
     accounts_data=$(cat "$OUTPUT_DIR/_systeminfo/accounts.json" 2>/dev/null || echo "[]")
 
+    # Build files[] for converter consumers (relative paths under
+    # OUTPUT_DIR; manifest.json itself excluded — it's about to be
+    # written; export.log excluded — it's appended throughout the run
+    # and is metadata, not migration content).
+    local files_json
+    files_json=$(cd "$OUTPUT_DIR" && find . -type f \
+        -not -name 'manifest.json' \
+        -not -name 'export.log' \
+        2>/dev/null | sed 's|^\./||' | jq -R . | jq -s '.')
+
+    # The DMA New Relic App's @dma/newrelic-converter ManifestParser
+    # expects: version, exportedAt, accounts[].region, counts (flat),
+    # files[]. The legacy fields (schema_version, export_timestamp,
+    # statistics, etc.) are kept so any consumer of the v1.0.1 schema
+    # still works — this manifest is a strict superset.
     jq -n \
         --arg schema_version "$SCHEMA_VERSION" \
         --arg tool_version "$SCRIPT_VERSION" \
@@ -1098,11 +1113,14 @@ generate_manifest() {
         --argjson include_usage "$([[ $INCLUDE_USAGE == true ]] && echo true || echo false)" \
         --argjson account_stats "$account_stats" \
         --argjson accounts "$accounts_data" \
+        --argjson files "$files_json" \
         '{
             schema_version: $schema_version,
+            version: $schema_version,
             export_tool_version: $tool_version,
             export_tool: $export_tool,
             export_timestamp: $export_timestamp,
+            exportedAt: $export_timestamp,
             export_end_timestamp: $export_end_timestamp,
             export_duration_seconds: $duration,
             source_system: {
@@ -1120,7 +1138,9 @@ generate_manifest() {
                 usage_analytics: $include_usage
             },
             statistics: $account_stats,
-            accounts: $accounts
+            counts: ($account_stats | to_entries | map(.value) | reduce .[] as $a ({}; . + $a)),
+            accounts: ($accounts | map(. + {region: $region})),
+            files: $files
         }' > "$OUTPUT_DIR/manifest.json" 2>/dev/null
 
     log_ok "Manifest generated"

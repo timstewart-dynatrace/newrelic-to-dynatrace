@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-05-05
+
+### Fixed
+
+- **Manifest schema now satisfies `@dma/newrelic-converter` `ManifestParser`.** The DMA New Relic App rejected uploaded archives with `Invalid manifest: Manifest missing "version" field`, then would have rejected for missing `exportedAt`, then `accounts[].region`, then `counts`. The exporter emitted `schema_version`/`export_timestamp`/nested `statistics` and accounts without per-account region. Both `generate_manifest()` (sh) and `Generate-Manifest` (ps1) now emit both naming conventions side-by-side: legacy fields preserved (back-compat for any v1.0.1 reader), plus `version`, `exportedAt`, `accounts[].region`, flattened `counts`, and `files[]` (relative paths under output dir, manifest and log excluded).
+
 ## [1.0.1] - 2026-04-22
 
 ### Fixed
