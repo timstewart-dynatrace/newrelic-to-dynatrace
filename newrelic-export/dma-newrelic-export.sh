@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.0.2
+#  DMA New Relic Export Script v1.0.3
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -89,7 +89,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.0.2"
+readonly SCRIPT_VERSION="1.0.3"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -277,7 +277,16 @@ nerdgraph_query() {
 
 # Merge a JSON array ($2) into an existing array ($1) and print the result
 json_merge_arrays() {
-    jq -n --argjson a "$1" --argjson b "$2" '$a + $b' 2>/dev/null || echo "$1"
+    # `--argjson` passes values via command-line argv, which is bounded
+    # by ARG_MAX (~256KB on Linux, ~1MB on macOS). Real-world dashboard
+    # exports can return per-batch payloads of several MB once
+    # widget rawConfiguration is included, blowing past ARG_MAX. The
+    # original implementation silently fell through to `echo "$1"` —
+    # producing empty exports for accounts with non-trivial dashboards.
+    # Pipe both arrays via stdin (jq -s slurps consecutive JSON values
+    # into an array, then `add` concatenates) — no command-line size
+    # limit. Same fallback semantics: return arg1 unchanged on jq error.
+    printf '%s\n%s\n' "$1" "$2" | jq -s 'add' 2>/dev/null || echo "$1"
 }
 
 # Count elements in a JSON array stored in a file

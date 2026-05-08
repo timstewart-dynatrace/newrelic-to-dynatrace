@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-05-08
+
+### Fixed
+
+- **`json_merge_arrays` no longer silently drops large batches** (sh only). The helper used `jq -n --argjson a "$1" --argjson b "$2"` to merge two JSON arrays — `--argjson` passes values via the command line, which is bounded by `ARG_MAX` (~256KB on Linux, ~1MB on macOS). Real-world dashboard exports can return per-batch payloads of several MB once `widget.rawConfiguration` is included, blowing past `ARG_MAX`. The original `2>/dev/null || echo "$1"` fallback then silently returned the first (empty) array, producing an export that reported `Exported 0 dashboards` while the entitySearch-then-batch-fetch logic correctly retrieved 24 dashboard details. Rewrote the helper to pipe both arrays via stdin (`printf | jq -s 'add'`) — no command-line size limit. Same fallback semantics. PowerShell port unaffected (uses native arrays, no shell-arg-size constraint).
+- Discovered while exporting an account with 5 terraform-managed dashboards plus their auto-generated child page entities (24 dashboard entities total). Verified post-fix: `Exported 24 dashboards`, tarball size 13KB vs the previous 5KB silent-empty.
+
 ## [1.0.2] - 2026-05-05
 
 ### Fixed
