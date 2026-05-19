@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-05-05
+
+### Fixed
+
+- **`--region` flag now works on macOS default bash (3.2)** (sh only). The argument parser used `REGION="${2^^}"`, a bash 4+ parameter expansion for uppercasing. macOS ships bash 3.2 as `/bin/bash`; running the script with `--region us` produced no uppercase conversion and downstream endpoint selection silently fell through to defaults. The pre-flight checklist already claims `bash 3.2+` support, so the bug was a divergence from the declared support matrix. Replaced with `REGION=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')` — POSIX-compatible, identical behavior on bash 4+. PowerShell port unaffected (case-insensitive parameter binding is native to PowerShell).
+
 ## [1.0.3] - 2026-05-08
 
 ### Fixed

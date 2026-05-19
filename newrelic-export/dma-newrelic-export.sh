@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.0.3
+#  DMA New Relic Export Script v1.0.4
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -89,7 +89,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.0.3"
+readonly SCRIPT_VERSION="1.0.4"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -1363,7 +1363,7 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --api-key)        API_KEY="$2"; shift 2 ;;
-            --region)         REGION="${2^^}"; shift 2 ;;
+            --region)         REGION=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]'); shift 2 ;;
             --accounts)       IFS=',' read -ra ACCOUNT_IDS <<< "$2"; shift 2 ;;
             --all)            EXPORT_DASHBOARDS=true; EXPORT_ALERTS=true;
                               EXPORT_SYNTHETICS=true; EXPORT_WORKLOADS=true;
