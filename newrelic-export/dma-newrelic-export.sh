@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.0.3
+#  DMA New Relic Export Script v1.1.0
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -89,7 +89,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.0.3"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -126,6 +126,7 @@ BOX_H="═"; BOX_V="║"; BOX_T="╠"; BOX_B="╣"
 API_KEY=""
 ACCOUNT_IDS=()
 REGION="US"
+REGION_EXPLICIT=false
 GRAPHQL_ENDPOINT="$API_ENDPOINT_US"
 OUTPUT_DIR=""
 LOG_FILE="/dev/null"
@@ -143,6 +144,57 @@ DEBUG=false
 # =============================================================================
 # LOGGING
 # =============================================================================
+
+load_env_file_if_present() {
+  local script_dir repo_env cwd_env dotenv_file=""
+  local had_user_api=false had_account_id=false had_region=false
+  local old_user_api="" old_account_id="" old_region=""
+
+  if [[ -n "${NEW_RELIC_USER_API_KEY+x}" ]]; then
+        had_user_api=true
+        old_user_api="$NEW_RELIC_USER_API_KEY"
+  fi
+  if [[ -n "${NEW_RELIC_ACCOUNT_ID+x}" ]]; then
+        had_account_id=true
+        old_account_id="$NEW_RELIC_ACCOUNT_ID"
+  fi
+  if [[ -n "${NEW_RELIC_REGION+x}" ]]; then
+        had_region=true
+        old_region="$NEW_RELIC_REGION"
+  fi
+
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_env="$script_dir/../.env"
+  cwd_env="$PWD/.env"
+
+  if [[ -f "$cwd_env" ]]; then
+        dotenv_file="$cwd_env"
+  elif [[ -f "$repo_env" ]]; then
+        dotenv_file="$repo_env"
+  fi
+
+  if [[ -n "$dotenv_file" ]]; then
+        # shellcheck disable=SC1090
+        set -a
+        source "$dotenv_file"
+        set +a
+
+        # Preserve caller-provided env values over .env defaults.
+        if [[ "$had_user_api" == "true" ]]; then
+            export NEW_RELIC_USER_API_KEY="$old_user_api"
+        fi
+        if [[ "$had_account_id" == "true" ]]; then
+            export NEW_RELIC_ACCOUNT_ID="$old_account_id"
+        fi
+        if [[ "$had_region" == "true" ]]; then
+            export NEW_RELIC_REGION="$old_region"
+        fi
+  fi
+}
+
+to_upper() {
+  printf '%s' "$1" | tr '[:lower:]' '[:upper:]'
+}
 
 print_color() {
     local color=$1; shift
@@ -1358,12 +1410,12 @@ EOF
 }
 
 parse_args() {
-    [[ $# -eq 0 ]] && { usage; exit 1; }
+  [[ $# -eq 0 ]] && { usage; exit 1; }
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --api-key)        API_KEY="$2"; shift 2 ;;
-            --region)         REGION="${2^^}"; shift 2 ;;
+            --region)         REGION="$(to_upper "$2")"; REGION_EXPLICIT=true; shift 2 ;;
             --accounts)       IFS=',' read -ra ACCOUNT_IDS <<< "$2"; shift 2 ;;
             --all)            EXPORT_DASHBOARDS=true; EXPORT_ALERTS=true;
                               EXPORT_SYNTHETICS=true; EXPORT_WORKLOADS=true;
@@ -1385,8 +1437,18 @@ parse_args() {
 }
 
 validate_args() {
+    [[ -z "$API_KEY" ]] && API_KEY="${NEW_RELIC_USER_API_KEY:-}"
+
+  if [[ ${#ACCOUNT_IDS[@]} -eq 0 && -n "${NEW_RELIC_ACCOUNT_ID:-}" ]]; then
+        IFS=',' read -ra ACCOUNT_IDS <<< "$NEW_RELIC_ACCOUNT_ID"
+  fi
+
+  if [[ "$REGION_EXPLICIT" != "true" && -n "${NEW_RELIC_REGION:-}" ]]; then
+        REGION="$(to_upper "$NEW_RELIC_REGION")"
+  fi
+
     if [[ -z "$API_KEY" ]]; then
-        print_color "$RED" "ERROR: --api-key is required"
+        print_color "$RED" "ERROR: --api-key is required (or set NEW_RELIC_USER_API_KEY)"
         echo "  Get a User API Key at: Account Settings → API keys → Create a key"
         exit 1
     fi
@@ -1441,6 +1503,7 @@ write_environment_info() {
 # =============================================================================
 
 main() {
+  load_env_file_if_present
     parse_args "$@"
     check_prerequisites
     validate_args

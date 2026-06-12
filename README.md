@@ -1,7 +1,7 @@
 # DMA New Relic Export Script
 
-**Version**: 1.0.1
-**Last Updated**: April 2026
+**Version**: 1.1.0
+**Last Updated**: June 2026
 
 > **Developed for Dynatrace One by Enterprise Solutions & Architecture**
 > *An ACE Services Division of Dynatrace*
@@ -11,6 +11,8 @@
 ## Overview
 
 `dma-newrelic-export.sh` (and `.ps1`) extracts dashboards, alert policies, NRQL conditions, synthetic monitors, workloads, service level indicators, and usage analytics from New Relic accounts via the NerdGraph GraphQL API. The export archive powers the **Dynatrace Migration Assistant (DMA)** — feeding the **DMA New Relic App** for migration planning, dashboard translation, and New Relic-to-Dynatrace conversion workflows.
+
+A companion script, `nr-supplemental-export.sh`, captures the object types the main exporter does not (incident workflows, notification destinations, muting rules, drop rules, log parsing rules, lookup tables, events-to-metrics rules, entity tags). Run it after the main export when a complete migration corpus is needed.
 
 ---
 
@@ -45,6 +47,16 @@ The script runs from **any machine with internet access** to the New Relic NerdG
 | **User API Key** | Account Settings → API keys → Create a key | Must be **User key** (not Ingest - License key) |
 
 The key must begin with `NRAK-`. Keys beginning with other prefixes will not work.
+
+### Credential Sources
+
+The bash script accepts credentials three ways, highest precedence first:
+
+1. **CLI flags** — `--api-key`, `--accounts`, `--region`
+2. **Environment variables** — `NEW_RELIC_USER_API_KEY`, `NEW_RELIC_ACCOUNT_ID`, `NEW_RELIC_REGION`
+3. **`.env` file** — same variable names; the current directory is checked first, then the repo root
+
+Never commit a `.env` file — it is git-ignored for this reason.
 
 ### Required Permissions
 

@@ -115,3 +115,20 @@ Technical decisions made in this project.
 **Trade-offs:** Some GNU idioms (in-place `sed -i`, `readlink -f`, `date -d`) need workarounds. Accepted as cost of portability; workarounds are documented inline where non-obvious.
 
 **Revisit if:** macOS support is dropped or GNU-only features become necessary (unlikely for this tool's scope).
+
+---
+
+## 2026-06-12 — Credential loading via .env with CLI-first precedence
+
+**Chosen:** Load `NEW_RELIC_USER_API_KEY` / `NEW_RELIC_ACCOUNT_ID` / `NEW_RELIC_REGION` from a `.env` file (cwd first, then repo root), applied only as fallbacks: CLI flags > process environment > `.env`. Loader snapshots pre-existing env values and restores them after sourcing, so an exported variable always beats a `.env` line.
+
+**Alternatives:**
+- Flags-only (status quo) — forces the key onto the command line and into shell history on every run
+- A `--config FILE` flag with a custom format — more code, nonstandard, no editor/tooling support
+- Named profiles (AWS-style `~/.dma/credentials`) — overkill for a one-shot migration tool
+
+**Why:** Repeat runs during a migration engagement re-enter the same key/account; `.env` is the established convention, already used by sibling DMA repos for DT tenant tokens. Keeping CLI flags as highest precedence preserves every existing invocation and the documented quick-start unchanged.
+
+**Trade-offs:** Sourcing `.env` executes it as shell — a malformed or malicious file runs code. Acceptable: the file is user-authored, git-ignored, and the same trust model as direnv/dotenv tooling.
+
+**Revisit if:** The PowerShell port needs parity (it currently has no `.env` support), or multi-tenant engagements need more than one credential set per checkout.
