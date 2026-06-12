@@ -6,3 +6,7 @@
 .env
 .env.local
 .env.*.local
+
+# build-docs.sh output (template + assets are tracked, rendered pages are not)
+newrelic-export/docs_html/*.html
+!newrelic-export/docs_html/html-template.html
