@@ -22,14 +22,15 @@ Complete prerequisites, permissions, and troubleshooting guide for running the N
 
 ### Bash Script (Linux / macOS)
 
-| Requirement | Minimum Version | Check |
-|---|---|---|
-| bash | 4.0+ | `bash --version` |
-| python3 | 3.6+ | `python3 --version` |
-| curl | 7.0+ | `curl --version` |
-| Disk space | 500MB+ free | `df -h .` |
+| Requirement | Minimum Version | Check | Install |
+|---|---|---|---|
+| bash | 3.2+ | `bash --version` | Pre-installed on macOS/Linux |
+| curl | 7.0+ | `curl --version` | Pre-installed on macOS/Linux |
+| jq | 1.5+ | `jq --version` | `brew install jq` (macOS) / `apt-get install jq` (Linux) |
+| tar | any | `tar --version` | Pre-installed on macOS/Linux |
+| Disk space | 500MB+ free | `df -h .` | — |
 
-> **macOS note:** macOS ships with bash 3.2. Install bash 5 via Homebrew: `brew install bash`
+> The script targets bash 3.2 (default on macOS) and works with `set -o pipefail` only — no need to install bash 5.
 
 ### PowerShell Script (Windows / Cross-platform)
 
@@ -122,7 +123,7 @@ curl -s -X POST https://api.newrelic.com/graphql \
   -H "Content-Type: application/json" \
   -H "API-Key: $NR_API_KEY" \
   -d '{"query":"{ actor { accounts { id name } } }"}' \
-  | python3 -m json.tool
+  | jq .
 ```
 
 ---
@@ -250,13 +251,13 @@ The API key's user lacks permissions on the requested account. Check [Required P
 - The user key may lack read permission for that resource
 - Run with `--debug` to see the raw API responses
 
-### `command not found: python3`
+### `command not found: jq`
 
-Install Python 3: `apt install python3` / `brew install python3`
+Install jq: `brew install jq` (macOS) or `apt-get install jq` (Linux). The script depends on jq for JSON parsing — there is no Python fallback.
 
-### Script exits immediately on macOS
+### `$'\r': command not found` on first run (Windows)
 
-macOS ships with bash 3.2 which does not support `set -euo pipefail` with associative arrays. Install bash 5: `brew install bash`, then run with `/usr/local/bin/bash ./dma-newrelic-export.sh ...`
+The script was edited or downloaded with Windows CRLF line endings. The script auto-detects this and rewrites itself in place — let it complete the conversion and re-run.
 
 ### Slow export on large environments
 
