@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`nr-supplemental-export.sh` v0.2.0 — `.env` credential support**, ported from the main exporter: loads `NEW_RELIC_USER_API_KEY` / `NEW_RELIC_ACCOUNT_ID` / `NEW_RELIC_REGION` from a `.env` file (current directory first, then repo root) with precedence CLI flags > exported environment > `.env`. Usage text updated (env section now documents the `.env` file and comma-separated account IDs).
+
 ### Fixed
+
+- **`nr-supplemental-export.sh`: `NEW_RELIC_REGION` was dead code** — `REGION` is initialized to `US`, so the `[[ -z "$REGION" ]]` env fallback could never fire; the env var the usage text advertised was silently ignored. Now applied whenever `--region` is not passed explicitly (`REGION_EXPLICIT` flag, same pattern as the main script).
+- **`nr-supplemental-export.sh`: lowercase region rejected** — `--region eu` failed the case-sensitive `US|EU` validation. Region input is now uppercased via the same POSIX `to_upper` helper as the main script (bash 3.2-safe). Verified on bash 3.2.57.
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 

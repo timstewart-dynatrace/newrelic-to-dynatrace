@@ -8,9 +8,9 @@ fi
 
 ################################################################################
 #
-#  NR Supplemental Export Script v0.1.0
+#  NR Supplemental Export Script v0.2.0
 #
-#  Captures the 8 NR object types that dma-newrelic-export.sh v1.0.4 does not
+#  Captures the 8 NR object types that dma-newrelic-export.sh v1.1.0 does not
 #  extract, so the migration corpus is complete before the NRQL → DQL hand-off.
 #
 #  Object types extracted:
@@ -32,7 +32,7 @@ fi
 
 set -o pipefail
 
-readonly SCRIPT_VERSION="0.1.0"
+readonly SCRIPT_VERSION="0.2.0"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="NR Supplemental Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -48,12 +48,66 @@ readonly API_RETRY_BACKOFF_SECONDS=2
 # Defaults
 API_KEY=""
 REGION="US"
+REGION_EXPLICIT=false
 ACCOUNTS=""
 OUTPUT_DIR="./dma-export"
 TEST_ACCESS=false
 VERBOSE=false
 ENTITY_TAG_KEY="team"
 ENTITY_TAG_VALUE="migration"
+
+to_upper() {
+    printf '%s' "$1" | tr '[:lower:]' '[:upper:]'
+}
+
+# Load .env credentials (ported from dma-newrelic-export.sh v1.1.0).
+# Precedence: CLI flags > process environment > .env (cwd first, then repo root).
+load_env_file_if_present() {
+    local script_dir repo_env cwd_env dotenv_file=""
+    local had_user_api=false had_account_id=false had_region=false
+    local old_user_api="" old_account_id="" old_region=""
+
+    if [[ -n "${NEW_RELIC_USER_API_KEY+x}" ]]; then
+        had_user_api=true
+        old_user_api="$NEW_RELIC_USER_API_KEY"
+    fi
+    if [[ -n "${NEW_RELIC_ACCOUNT_ID+x}" ]]; then
+        had_account_id=true
+        old_account_id="$NEW_RELIC_ACCOUNT_ID"
+    fi
+    if [[ -n "${NEW_RELIC_REGION+x}" ]]; then
+        had_region=true
+        old_region="$NEW_RELIC_REGION"
+    fi
+
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    repo_env="$script_dir/../.env"
+    cwd_env="$PWD/.env"
+
+    if [[ -f "$cwd_env" ]]; then
+        dotenv_file="$cwd_env"
+    elif [[ -f "$repo_env" ]]; then
+        dotenv_file="$repo_env"
+    fi
+
+    if [[ -n "$dotenv_file" ]]; then
+        # shellcheck disable=SC1090
+        set -a
+        source "$dotenv_file"
+        set +a
+
+        # Preserve caller-provided env values over .env defaults.
+        if [[ "$had_user_api" == "true" ]]; then
+            export NEW_RELIC_USER_API_KEY="$old_user_api"
+        fi
+        if [[ "$had_account_id" == "true" ]]; then
+            export NEW_RELIC_ACCOUNT_ID="$old_account_id"
+        fi
+        if [[ "$had_region" == "true" ]]; then
+            export NEW_RELIC_REGION="$old_region"
+        fi
+    fi
+}
 
 # =============================================================================
 # Color + logging
@@ -555,10 +609,11 @@ OPTIONAL:
     --verbose            Verbose logging
     --help               This help
 
-ENV alternatives:
+ENV alternatives (exported vars, or a .env file in the current directory
+or repo root — precedence: CLI flags > exported env > .env):
     NEW_RELIC_USER_API_KEY       same as --api-key
-    NEW_RELIC_ACCOUNT_ID         same as --accounts (single account)
-    NEW_RELIC_REGION             same as --region
+    NEW_RELIC_ACCOUNT_ID         same as --accounts (comma-separated ok)
+    NEW_RELIC_REGION             same as --region (case-insensitive)
 
 EXAMPLE:
     $0 --api-key NRAK-XXX --accounts 8018100 --output-dir ./tmp/export
@@ -570,7 +625,7 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --api-key)     API_KEY="$2";       shift 2 ;;
-            --region)      REGION="$2";        shift 2 ;;
+            --region)      REGION="$(to_upper "$2")"; REGION_EXPLICIT=true; shift 2 ;;
             --accounts)    ACCOUNTS="$2";      shift 2 ;;
             --output-dir)  OUTPUT_DIR="$2";    shift 2 ;;
             --tag-key)     ENTITY_TAG_KEY="$2"; shift 2 ;;
@@ -582,10 +637,12 @@ parse_args() {
         esac
     done
 
-    # Env fallbacks
+    # Env fallbacks (vars may come from the shell or a sourced .env)
     [[ -z "$API_KEY" ]] && API_KEY="${NEW_RELIC_USER_API_KEY:-}"
     [[ -z "$ACCOUNTS" ]] && ACCOUNTS="${NEW_RELIC_ACCOUNT_ID:-}"
-    [[ -z "$REGION" ]] && REGION="${NEW_RELIC_REGION:-US}"
+    if [[ "$REGION_EXPLICIT" != "true" && -n "${NEW_RELIC_REGION:-}" ]]; then
+        REGION="$(to_upper "$NEW_RELIC_REGION")"
+    fi
 
     if [[ -z "$API_KEY" ]]; then
         log_error "Missing --api-key (or NEW_RELIC_USER_API_KEY env)"
@@ -602,6 +659,7 @@ parse_args() {
 # Main
 # =============================================================================
 main() {
+    load_env_file_if_present
     parse_args "$@"
     check_prerequisites
 
