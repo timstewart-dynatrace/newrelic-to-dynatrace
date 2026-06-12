@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>$title$ | Dynatrace Migration Assistant</title>
+    <style>
+        :root {
+            --db-header-bg: #14172b;
+            --db-nav-dark: #1a1d2e;
+            --db-accent-purple: #7c5dc7;
+            --db-accent-blue: #4da6e8;
+            --db-accent-green: #6abf4b;
+            --content-bg: #ffffff;
+            --content-card: #f8f9fa;
+            --text-dark: #1a1a2e;
+            --text-body: #3a3a4a;
+            --text-muted: #6c757d;
+            --text-light: #ffffff;
+            --accent-blue: #1456ff;
+            --success: #6abf4b;
+            --border-light: #e0e0e0;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            line-height: 1.45;
+            color: var(--text-dark);
+            background: var(--content-bg);
+            font-size: 14px;
+        }
+
+        /* Header - Compact */
+        .header-banner {
+            background: var(--db-header-bg);
+            padding: 20px 16px;
+            text-align: center;
+        }
+        .header-content { max-width: 900px; margin: 0 auto; }
+        .logo-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .logo-image { height: 36px; width: 36px; object-fit: contain; }
+        .logo-text { font-size: 1.5em; font-weight: 700; color: var(--text-light); }
+        .logo-text .highlight { color: var(--db-accent-purple); }
+        .header-tagline {
+            color: rgba(255,255,255,0.6);
+            font-size: 0.85em;
+            margin-bottom: 10px;
+        }
+        .version-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.15);
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            color: rgba(255,255,255,0.7);
+        }
+        .version-badge .dot { width: 5px; height: 5px; background: var(--success); border-radius: 50%; }
+        .doc-title { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .doc-title h2 { color: var(--text-light); font-size: 1.1em; font-weight: 600; margin: 0; padding: 0; border: none; }
+
+        /* Navigation - Compact */
+        .doc-nav {
+            background: var(--db-nav-dark);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .doc-nav-inner { max-width: 1100px; margin: 0 auto; display: flex; flex-wrap: wrap; justify-content: center; }
+        .doc-nav a {
+            color: rgba(255,255,255,0.55);
+            text-decoration: none;
+            font-size: 0.78em;
+            font-weight: 500;
+            padding: 10px 14px;
+            border-bottom: 2px solid transparent;
+            transition: all 0.15s;
+        }
+        .doc-nav a:hover { color: var(--text-light); background: rgba(255,255,255,0.05); border-bottom-color: var(--db-accent-purple); }
+
+        /* Content - Tight */
+        .content { max-width: 900px; margin: 0 auto; padding: 20px 24px 30px; }
+
+        /* Typography - Compact */
+        h1 {
+            color: var(--text-dark);
+            font-size: 1.6em;
+            font-weight: 700;
+            margin-bottom: 4px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid var(--db-accent-purple);
+        }
+        h2 {
+            color: var(--text-dark);
+            font-size: 1.25em;
+            font-weight: 600;
+            margin-top: 20px;
+            margin-bottom: 6px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid var(--border-light);
+        }
+        h3 {
+            color: var(--text-dark);
+            font-size: 1.05em;
+            font-weight: 600;
+            margin-top: 14px;
+            margin-bottom: 4px;
+        }
+        h4 {
+            color: var(--text-dark);
+            font-size: 0.95em;
+            font-weight: 600;
+            margin-top: 10px;
+            margin-bottom: 3px;
+        }
+        h5, h6 {
+            color: var(--text-dark);
+            font-size: 0.9em;
+            font-weight: 600;
+            margin-top: 8px;
+            margin-bottom: 2px;
+        }
+        p { margin-bottom: 8px; color: var(--text-body); }
+        strong { color: var(--text-dark); font-weight: 600; }
+        a { color: var(--accent-blue); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        /* Code - Compact */
+        pre {
+            background: #1e1e2e;
+            border: 1px solid #2d2d3d;
+            border-radius: 4px;
+            padding: 10px 12px;
+            overflow-x: auto;
+            margin: 8px 0;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-size: 0.82em;
+            line-height: 1.4;
+            color: #e0e0e0;
+        }
+        code {
+            background: #f0f0f2;
+            color: #c7254e;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-size: 0.85em;
+        }
+        pre code { background: none; padding: 0; color: #e0e0e0; }
+
+        /* Tables - Compact */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+            font-size: 0.88em;
+            border: 1px solid var(--border-light);
+        }
+        th {
+            background: var(--db-nav-dark);
+            color: var(--text-light);
+            padding: 8px 10px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.8em;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+        }
+        td {
+            padding: 7px 10px;
+            border-bottom: 1px solid var(--border-light);
+            color: var(--text-body);
+        }
+        tr:last-child td { border-bottom: none; }
+        tr:nth-child(even) td { background: #f9f9fb; }
+
+        /* Lists - Tight */
+        ul, ol { margin: 6px 0; padding-left: 20px; color: var(--text-body); }
+        li { margin-bottom: 2px; }
+        li::marker { color: var(--db-accent-purple); }
+
+        /* Blockquotes */
+        blockquote {
+            background: var(--content-card);
+            border-left: 3px solid var(--db-accent-purple);
+            border-radius: 0 4px 4px 0;
+            padding: 8px 12px;
+            margin: 10px 0;
+        }
+        blockquote p { margin-bottom: 0; }
+
+        /* HR - Minimal */
+        hr { border: none; border-top: 1px solid var(--border-light); margin: 16px 0; }
+
+        /* Footer - Compact */
+        .footer { background: var(--db-nav-dark); padding: 20px 16px; text-align: center; }
+        .footer-content { max-width: 600px; margin: 0 auto; }
+        .footer-logo { font-size: 1em; font-weight: 700; color: var(--text-light); margin-bottom: 6px; }
+        .footer-logo .highlight { color: var(--db-accent-purple); }
+        .footer p { color: rgba(255,255,255,0.5); font-size: 0.8em; margin-bottom: 4px; }
+        .footer-links { display: flex; justify-content: center; gap: 16px; margin-top: 10px; flex-wrap: wrap; }
+        .footer-links a { color: rgba(255,255,255,0.45); font-size: 0.75em; }
+        .footer-links a:hover { color: var(--db-accent-purple); text-decoration: none; }
+        .footer-copyright {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            font-size: 0.7em;
+            color: rgba(255,255,255,0.35);
+        }
+
+        /* Print */
+        @media print {
+            .doc-nav, .footer { display: none; }
+            .content { max-width: 100%; padding: 12px; }
+            .header-banner { padding: 12px; }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header-banner { padding: 16px 12px; }
+            .logo-text { font-size: 1.2em; }
+            .logo-image { height: 28px; width: 28px; }
+            .content { padding: 16px 12px; }
+            h1 { font-size: 1.4em; }
+            h2 { font-size: 1.15em; }
+            table { font-size: 0.82em; }
+            th, td { padding: 6px 8px; }
+            .doc-nav a { padding: 8px 10px; font-size: 0.72em; }
+        }
+    </style>
+</head>
+<body>
+    <header class="header-banner">
+        <div class="header-content">
+            <div class="logo-container">
+                <img class="logo-image" src="dma-symbol.png" alt="DMA" onerror="this.style.display='none'" />
+                <div class="logo-text">Dynatrace Migration Assistant</div>
+            </div>
+            <p class="header-tagline">Migration Intelligence Platform for New Relic to Dynatrace</p>
+            <span class="version-badge"><span class="dot"></span>Version 1.1.0</span>
+            <div class="doc-title"><h2>$title$</h2></div>
+        </div>
+    </header>
+
+    <nav class="doc-nav">
+        <div class="doc-nav-inner">
+            <a href="README-NEWRELIC.html">Setup Guide</a>
+            <a href="INTERACTIVE-WALKTHROUGH.html">Walkthrough</a>
+            <a href="EXPORT-SCHEMA.html">Export Schema</a>
+            <a href="SCRIPT-GENERATED-ANALYTICS-REFERENCE.html">Analytics Reference</a>
+            <a href="MANUAL-USAGE-QUERIES.html">Manual Usage Queries</a>
+        </div>
+    </nav>
+
+    <main class="content">
+$body$
+    </main>
+
+    <footer class="footer">
+        <div class="footer-content">
+            <div class="footer-logo">Dynatrace Migration Assistant</div>
+            <p>Migration intelligence for New Relic to Dynatrace Gen3 Grail</p>
+            <div class="footer-links">
+                <a href="README-NEWRELIC.html">Setup Guide</a>
+                <a href="INTERACTIVE-WALKTHROUGH.html">Walkthrough</a>
+                <a href="EXPORT-SCHEMA.html">Schema</a>
+                <a href="SCRIPT-GENERATED-ANALYTICS-REFERENCE.html">Analytics</a>
+            </div>
+            <p class="footer-copyright">DMA Project &bull; Built for Dynatrace Gen3 Platform</p>
+        </div>
+    </footer>
+</body>
+</html>

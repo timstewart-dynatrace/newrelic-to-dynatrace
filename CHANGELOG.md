@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-12
+
+### Added
+
+- **`.env` credential support** (sh only). The exporter now loads `NEW_RELIC_USER_API_KEY`, `NEW_RELIC_ACCOUNT_ID`, and `NEW_RELIC_REGION` from a `.env` file (current directory first, then repo root) or from already-exported environment variables. Precedence: CLI flags > process environment > `.env`. The `--api-key` error message now points at the env-var alternative. `.gitignore` gains `.env*` entries so credentials never land in git.
+- **`nr-supplemental-export.sh` v0.1.0** — companion extractor covering the 8 NR object types the main exporter does not capture: aiWorkflows (incident routing), notification destinations, muting rules, NRQL drop rules (NR EOL 2026-06-30), log parsing (Grok) rules, lookup tables, events-to-metrics rules, and entity tags. CLI surface mirrors `dma-newrelic-export.sh` for operational consistency.
+- **`build-docs.sh`** — pandoc renderer turning `newrelic-export/docs_markdown/*.md` into styled HTML in `newrelic-export/docs_html/` (template and logo tracked; rendered pages git-ignored).
+
+### Fixed
+
+- **`--region` flag now works on macOS default bash (3.2)** (sh only). The argument parser used `REGION="${2^^}"`, a bash 4+ uppercasing expansion that silently does nothing on macOS's `/bin/bash` 3.2, so `--region eu` fell through to the US endpoint. Replaced with a POSIX `tr`-based `to_upper` helper, which the new `NEW_RELIC_REGION` fallback also uses. Verified on bash 3.2.57. Supersedes PR #1 (same fix, different implementation). PowerShell port unaffected (parameter binding is case-insensitive).
+
 ## [1.0.3] - 2026-05-08
 
 ### Fixed
