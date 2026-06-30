@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## This Repo
 
-`newrelic-to-dynatrace` holds the **New Relic export scripts** — the first stage of the DMA New Relic pipeline. The scripts in [`newrelic-export/`](newrelic-export/) (`dma-newrelic-export.sh` / `.ps1`, plus `nr-supplemental-export.sh`) pull the customer's NR configuration via NerdGraph/REST and produce a **`dma_export_newrelic_<timestamp>.tar.gz`** archive (dashboards, alert policies + NRQL conditions, SLOs, synthetics, workloads + `manifest.json`). That archive is the input consumed downstream by `@dma/newrelic-converter`, `dma-newrelic-app`, and `dma-server`.
+`newrelic-to-dynatrace` holds the **New Relic export scripts** — the first stage of the DMA New Relic pipeline. The scripts in [`newrelic-export/`](newrelic-export/) (`dma-newrelic-export.sh` / `.ps1`) pull the customer's NR configuration via NerdGraph/REST and produce a **`dma_export_newrelic_<timestamp>.tar.gz`** archive (dashboards, alert policies + NRQL conditions, SLOs, synthetics, workloads, the 8 supplemental object types under `supplemental/` + `manifest.json`). That archive is the input consumed downstream by `@dma/newrelic-converter`, `dma-newrelic-app`, and `dma-server`.
 
 **Track context:** this repo implements step 1 of the GOAL in [`dma-workspace/DMA-NEWRELIC/CLAUDE.md`](../dma-workspace/DMA-NEWRELIC/CLAUDE.md) — read that first for the NR-track directives (knowledge persistence, parity mandate, conversion-quality cautions). The DMA platform rules in [`dma-workspace/CLAUDE.md`](../dma-workspace/CLAUDE.md) apply (never commit/push without explicit instruction; `dynatrace-dma`-adjacent security rules — note this repo lives under `timstewart-dynatrace`, not `dynatrace-dma`).
 
 ## Key paths
 
-- **Export scripts**: `newrelic-export/dma-newrelic-export.sh` (canonical, v1.1.0 — `.env` credential support, bash 3.2 region fix), `.ps1` (Windows port, v1.0.2), `nr-supplemental-export.sh` (supplemental 8-category extractor, v0.1.0 — shipped in v1.1.0 / tag `v1.1.0`)
+- **Export scripts**: `newrelic-export/dma-newrelic-export.sh` (canonical, **v1.3.0** — emits **one archive per account** [`dma_export_newrelic_<account_id>_<timestamp>.tar.gz`; account = DT-tenant-equivalent → its own DMA project]; folds in the 8 supplemental object types [v1.2.0] formerly in `nr-supplemental-export.sh`; opt in via `--all`/`--supplemental`/`--<type>`), `.ps1` (Windows port, v1.0.2 — **supplemental + per-account parity are pending follow-ups**). The standalone `nr-supplemental-export.sh` was removed in v1.2.0.
 - **Docs**: `newrelic-export/docs_markdown/` + `docs_html/` (built via `build-docs.sh`)
 - **Decisions / history**: `DECISIONS.md`, `CHANGELOG.md`
 - Sample archives (`dma_export_newrelic_*.tar.gz`) at the repo root are test fixtures for downstream converter work

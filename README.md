@@ -1,6 +1,6 @@
 # DMA New Relic Export Script
 
-**Version**: 1.1.0
+**Version**: 1.3.0
 **Last Updated**: June 2026
 
 > **Developed for Dynatrace One by Enterprise Solutions & Architecture**
@@ -12,7 +12,11 @@
 
 `dma-newrelic-export.sh` (and `.ps1`) extracts dashboards, alert policies, NRQL conditions, synthetic monitors, workloads, service level indicators, and usage analytics from New Relic accounts via the NerdGraph GraphQL API. The export archive powers the **Dynatrace Migration Assistant (DMA)** — feeding the **DMA New Relic App** for migration planning, dashboard translation, and New Relic-to-Dynatrace conversion workflows.
 
-A companion script, `nr-supplemental-export.sh`, captures the object types the main exporter does not (incident workflows, notification destinations, muting rules, drop rules, log parsing rules, lookup tables, events-to-metrics rules, entity tags). Run it after the main export when a complete migration corpus is needed.
+As of **v1.2.0** the exporter also captures the 8 supplemental object types that used to live in the standalone `nr-supplemental-export.sh` (incident/AI workflows, notification destinations, muting rules, drop rules, log parsing rules, lookup tables, events-to-metrics rules, entity tags). They are now part of the single `dma_export_newrelic_<timestamp>.tar.gz` archive — written to `account_<id>/supplemental/` and recorded under the `supplemental` block of `manifest.json`. They opt in exactly like the core types: `--all` captures them along with everything else, `--supplemental` enables the whole group, or `--<type>` enables one (e.g. `--drop-rules`); subtract from `--all` with `--no-<type>` (e.g. `--no-drop-rules`) or `--no-supplemental`. The separate supplemental script has been removed.
+
+As of **v1.3.0** the exporter emits **one archive per account** — `dma_export_newrelic_<account_id>_<timestamp>.tar.gz` for each account in the run — instead of a single combined multi-account archive. The DMA treats a New Relic account as a Dynatrace-tenant-equivalent (its own org/team/environment, e.g. prod vs nonprod), so each account is a distinct migration scope/target: **import each archive into the DMA New Relic App as its own project.** Each per-account archive contains exactly one `account_<id>/` tree + a single-account `manifest.json` (with exact per-account `counts`) and the shared `_systeminfo`/summary/log, so it stands alone. (A multi-account run simply produces multiple files.)
+
+> **PowerShell note:** the `.ps1` Windows port does **not** yet include the 8 supplemental object types (v1.2.0) or the per-account archive split (v1.3.0) — that parity work is a separate follow-up.
 
 ---
 
