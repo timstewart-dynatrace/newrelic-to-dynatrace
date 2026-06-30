@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.1.0
+#  DMA New Relic Export Script v1.3.0
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -17,6 +17,12 @@ fi
 #  monitors, workloads, service level indicators, and usage analytics from your
 #  New Relic accounts via the NerdGraph GraphQL API to enable migration planning
 #  and execution using the DMA (Dynatrace Migration Assistant) application.
+#
+#  As of v1.2.0 it also captures 8 supplemental object types (formerly in
+#  nr-supplemental-export.sh, now folded in): AI workflows, AI notification
+#  destinations, alert muting rules, NRQL drop rules, log parsing rules,
+#  lookup tables, events-to-metrics rules, and entity tags. These land in
+#  account_<id>/supplemental/ inside the same single tarball + manifest.
 #
 ################################################################################
 #
@@ -89,7 +95,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.3.0"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -140,6 +146,25 @@ INCLUDE_RBAC=false
 INCLUDE_USAGE=false
 ANONYMIZE=false
 DEBUG=false
+
+# Supplemental object-type toggles (folded in from nr-supplemental-export.sh
+# v0.2.0 in v1.2.0). Default FALSE — opt in exactly like the core types:
+# `--all` enables them along with everything else, `--supplemental` enables the
+# whole group, or `--<type>` enables one. (`--no-<type>` / `--no-supplemental`
+# subtract from `--all`.) The data lands in account_<id>/supplemental/ and is
+# included in the single tarball.
+EXPORT_AI_WORKFLOWS=false
+EXPORT_AI_DESTINATIONS=false
+EXPORT_MUTING_RULES=false
+EXPORT_DROP_RULES=false
+EXPORT_LOG_CONFIGS=false
+EXPORT_LOOKUP_TABLES=false
+EXPORT_EVENTS_TO_METRICS=false
+EXPORT_ENTITY_TAGS=false
+
+# entitySearch tag filter for export_entity_tags (ported from supplemental).
+ENTITY_TAG_KEY="team"
+ENTITY_TAG_VALUE="migration"
 
 # =============================================================================
 # LOGGING
@@ -325,6 +350,93 @@ nerdgraph_query() {
     log_warn "API request failed after $API_RETRY_COUNT attempts"
     echo "{}"
     return 0
+}
+
+# Execute a NerdGraph query that takes GraphQL variables. This is the
+# variables-capable sibling of nerdgraph_query() above — ported from
+# nr-supplemental-export.sh v0.2.0 so the 8 supplemental extractors can pass
+# parameterized queries (e.g. `query ($id: Int!){...}`). It reuses the
+# primary's endpoint ($GRAPHQL_ENDPOINT), constants, and logging. The primary's
+# original single-arg nerdgraph_query() is intentionally left untouched (it is
+# the live export path). Prints the JSON response body to stdout.
+nerdgraph_query_vars() {
+    local query="$1"
+    local variables="$2"
+    # bash parameter-expansion default of `{}` collides with brace expansion;
+    # use an explicit check instead.
+    [[ -z "$variables" ]] && variables='{}'
+
+    local payload
+    payload=$(jq -nc --arg q "$query" --argjson v "$variables" '{query: $q, variables: $v}')
+
+    local attempt=0
+    while [[ $attempt -lt $API_RETRY_COUNT ]]; do
+        local response http_code body
+
+        response=$(curl -s \
+            --write-out "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "API-Key: $API_KEY" \
+            --data "$payload" \
+            "$GRAPHQL_ENDPOINT" 2>>"$LOG_FILE") || true
+
+        http_code=$(echo "$response" | tail -1)
+        body=$(echo "$response" | sed '$d')
+
+        case "$http_code" in
+            200)
+                local has_errors
+                has_errors=$(echo "$body" | jq 'if .errors and (.errors | length > 0) then "true" else "false" end' -r 2>/dev/null || echo "true")
+                if [[ "$has_errors" == "false" ]]; then
+                    echo "$body"
+                    return 0
+                fi
+                log_warn "GraphQL errors (attempt $((attempt+1))/$API_RETRY_COUNT)"
+                log_debug "Response: $body"
+                # On the final attempt, return whatever body exists so partial
+                # results (and any data block) are still saved by the caller.
+                if [[ $((attempt + 1)) -ge $API_RETRY_COUNT ]]; then
+                    echo "$body"
+                    return 0
+                fi
+                ;;
+            401)
+                log_error "Authentication failed (HTTP 401). Verify your --api-key."
+                echo "{}"; return 1 ;;
+            403)
+                log_error "Permission denied (HTTP 403). Ensure the API key has Full Platform Access."
+                echo "{}"; return 1 ;;
+            000)
+                log_warn "Network error — could not reach $GRAPHQL_ENDPOINT (attempt $((attempt+1))/$API_RETRY_COUNT)"
+                ;;
+            *)
+                log_warn "HTTP $http_code (attempt $((attempt+1))/$API_RETRY_COUNT)"
+                ;;
+        esac
+
+        attempt=$((attempt + 1))
+        if [[ $attempt -lt $API_RETRY_COUNT ]]; then
+            local sleep_secs=$((2 ** attempt))
+            log_warn "Retrying in ${sleep_secs}s..."
+            sleep "$sleep_secs"
+        fi
+    done
+
+    log_warn "API request failed after $API_RETRY_COUNT attempts"
+    echo "{}"
+    return 0
+}
+
+# Wraps `actor.account(id: $id) { ... }` around a body — saves repeating the
+# scaffolding for the parameterized supplemental queries. Pure string builder
+# (the account_id arg is accepted for call-site symmetry but the value is
+# bound at request time via the GraphQL $id variable). Ported verbatim from
+# nr-supplemental-export.sh.
+account_scoped_query() {
+    local account_id="$1"
+    local body="$2"
+    echo "query (\$id: Int!) { actor { account(id: \$id) { $body } } }"
 }
 
 # Merge a JSON array ($2) into an existing array ($1) and print the result
@@ -912,6 +1024,313 @@ GRAPHQL
 }
 
 # =============================================================================
+# SUPPLEMENTAL OBJECT TYPES
+# Folded in from nr-supplemental-export.sh v0.2.0 (v1.2.0). These 8 extractors
+# capture the NR object types the core export above does not. Each keeps its
+# original (account_id, outdir) signature and writes JSON into the supplemental
+# directory; the only change from the standalone script is that they call
+# nerdgraph_query_vars (variables-capable) instead of the standalone's
+# nerdgraph_query. Each echoes its element count on stdout (logs go to stderr)
+# so the account loop can collect counts for the manifest.
+# =============================================================================
+
+export_ai_workflows() {
+    local account_id="$1" outdir="$2"
+    log_info "  → aiWorkflows"
+    local query
+    query=$(account_scoped_query "$account_id" '
+        aiWorkflows {
+            workflows(filters: {}) {
+                entities {
+                    id
+                    name
+                    mutingRulesHandling
+                    workflowEnabled
+                    destinationsEnabled
+                    issuesFilter {
+                        id
+                        name
+                        type
+                        predicates {
+                            attribute
+                            operator
+                            values
+                        }
+                    }
+                    destinationConfigurations {
+                        channelId
+                        name
+                        type
+                    }
+                    enrichments {
+                        id
+                        name
+                        configurations {
+                            ... on AiWorkflowsNrqlConfiguration { query }
+                        }
+                    }
+                    createdAt
+                    updatedAt
+                }
+                nextCursor
+                totalCount
+            }
+        }
+    ')
+    local vars
+    vars=$(jq -nc --argjson id "$account_id" '{id: $id}')
+    nerdgraph_query_vars "$query" "$vars" \
+        | jq '.data.actor.account.aiWorkflows.workflows' \
+        > "$outdir/aiWorkflows.json"
+    local count
+    count=$(jq '.totalCount // (.entities | length) // 0' "$outdir/aiWorkflows.json")
+    log_ok "    aiWorkflows: ${count} workflows"
+    echo "$count"
+}
+
+export_ai_destinations() {
+    local account_id="$1" outdir="$2"
+    log_info "  → aiNotificationsDestinations"
+    local query
+    query=$(account_scoped_query "$account_id" '
+        aiNotifications {
+            destinations(filters: {}) {
+                entities {
+                    id
+                    name
+                    type
+                    active
+                    status
+                    properties {
+                        key
+                        value
+                        label
+                        displayValue
+                    }
+                    createdAt
+                    updatedAt
+                }
+                nextCursor
+                totalCount
+            }
+        }
+    ')
+    local vars
+    vars=$(jq -nc --argjson id "$account_id" '{id: $id}')
+    nerdgraph_query_vars "$query" "$vars" \
+        | jq '.data.actor.account.aiNotifications.destinations' \
+        > "$outdir/aiNotificationsDestinations.json"
+    local count
+    count=$(jq '.totalCount // (.entities | length) // 0' "$outdir/aiNotificationsDestinations.json")
+    log_ok "    destinations: ${count}"
+    echo "$count"
+}
+
+export_muting_rules() {
+    local account_id="$1" outdir="$2"
+    log_info "  → alertsMutingRules"
+    local query
+    query=$(account_scoped_query "$account_id" '
+        alerts {
+            mutingRules {
+                id
+                name
+                enabled
+                description
+                condition {
+                    operator
+                    conditions {
+                        attribute
+                        operator
+                        values
+                    }
+                }
+                schedule {
+                    startTime
+                    endTime
+                    timeZone
+                    repeat
+                    repeatCount
+                    weeklyRepeatDays
+                    nextStartTime
+                    nextEndTime
+                }
+                status
+                createdAt
+                updatedAt
+            }
+        }
+    ')
+    local vars
+    vars=$(jq -nc --argjson id "$account_id" '{id: $id}')
+    nerdgraph_query_vars "$query" "$vars" \
+        | jq '.data.actor.account.alerts.mutingRules' \
+        > "$outdir/alertsMutingRules.json"
+    local count
+    count=$(jq 'length' "$outdir/alertsMutingRules.json" 2>/dev/null || echo 0)
+    log_ok "    muting rules: ${count}"
+    echo "$count"
+}
+
+export_drop_rules() {
+    local account_id="$1" outdir="$2"
+    log_info "  → nrqlDropRules"
+    local query
+    query=$(account_scoped_query "$account_id" '
+        nrqlDropRules {
+            list {
+                rules {
+                    id
+                    accountId
+                    action
+                    description
+                    nrql
+                    createdBy
+                    createdAt
+                }
+                error {
+                    description
+                    reason
+                }
+            }
+        }
+    ')
+    local vars
+    vars=$(jq -nc --argjson id "$account_id" '{id: $id}')
+    nerdgraph_query_vars "$query" "$vars" \
+        | jq '.data.actor.account.nrqlDropRules.list' \
+        > "$outdir/nrqlDropRules.json"
+    local count
+    count=$(jq '.rules | length' "$outdir/nrqlDropRules.json" 2>/dev/null || echo 0)
+    log_ok "    drop rules: ${count}"
+    echo "$count"
+}
+
+export_log_configs() {
+    local account_id="$1" outdir="$2"
+    log_info "  → logConfigurations.parsingRules"
+    local query
+    query=$(account_scoped_query "$account_id" '
+        logConfigurations {
+            parsingRules {
+                id
+                description
+                enabled
+                grok
+                lucene
+                nrql
+                attribute
+                deleted
+                createdBy { email }
+                updatedAt
+            }
+        }
+    ')
+    local vars
+    vars=$(jq -nc --argjson id "$account_id" '{id: $id}')
+    nerdgraph_query_vars "$query" "$vars" \
+        | jq '.data.actor.account.logConfigurations.parsingRules' \
+        > "$outdir/logConfigurations.json"
+    local count
+    count=$(jq 'length' "$outdir/logConfigurations.json" 2>/dev/null || echo 0)
+    log_ok "    parsing rules: ${count}"
+    echo "$count"
+}
+
+export_lookup_tables() {
+    local account_id="$1" outdir="$2"
+    log_info "  → lookupTables (best-effort; NerdGraph schema varies)"
+    # NR's lookup-tables NerdGraph surface is in flux. `Account.nrqlLookups`
+    # is the correct field name (replaces the older `lookupTables` name), but
+    # its inner fields are not introspectable on all account tiers and the
+    # public schema has been in flux. For the migration corpus we write a
+    # placeholder pointing at the source CSVs (which are committed in
+    # test-NewRelic-setup/terraform/newrelic/lookup-tables/data/). If/when NR
+    # stabilizes the schema, replace this with a real query.
+    cat > "$outdir/lookupTables.json" <<JSON
+{
+  "_note": "Lookup tables are not extractable via NerdGraph on this account tier — the schema fields under Account.nrqlLookups are not publicly introspectable. Source-of-truth CSVs live in test-NewRelic-setup/terraform/newrelic/lookup-tables/data/. Upload via test-NewRelic-setup/terraform/newrelic/lookup-tables/upload.sh.",
+  "schema_status": "fields_not_introspectable_on_tier",
+  "source_repo": "test-NewRelic-setup",
+  "source_path": "terraform/newrelic/lookup-tables/data/",
+  "lookups": []
+}
+JSON
+    log_warn "    lookup tables: schema fields not introspectable; placeholder pointing at source CSVs"
+    echo "0"
+}
+
+export_events_to_metrics() {
+    local account_id="$1" outdir="$2"
+    log_info "  → eventsToMetricsRules (DMA gap)"
+    local query
+    query=$(account_scoped_query "$account_id" '
+        eventsToMetrics {
+            allRules {
+                rules {
+                    id
+                    accountId
+                    name
+                    description
+                    enabled
+                    nrql
+                    createdAt
+                    updatedAt
+                }
+            }
+        }
+    ')
+    local vars
+    vars=$(jq -nc --argjson id "$account_id" '{id: $id}')
+    nerdgraph_query_vars "$query" "$vars" \
+        | jq '.data.actor.account.eventsToMetrics.allRules' \
+        > "$outdir/eventsToMetricsRules.json"
+    local count
+    count=$(jq '.rules | length' "$outdir/eventsToMetricsRules.json" 2>/dev/null || echo 0)
+    log_ok "    E2M rules: ${count}"
+    echo "$count"
+}
+
+export_entity_tags() {
+    local account_id="$1" outdir="$2"
+    log_info "  → entityTags (entities with tag ${ENTITY_TAG_KEY}=${ENTITY_TAG_VALUE})"
+    # entitySearch uses a query string. Two clauses: accountId scope + tag match.
+    local search_query="tags.${ENTITY_TAG_KEY} = '${ENTITY_TAG_VALUE}' AND accountId = ${account_id}"
+    local query='
+        query ($searchQuery: String!) {
+            actor {
+                entitySearch(query: $searchQuery) {
+                    results {
+                        entities {
+                            guid
+                            name
+                            domain
+                            type
+                            accountId
+                            tags {
+                                key
+                                values
+                            }
+                        }
+                        nextCursor
+                    }
+                    count
+                }
+            }
+        }
+    '
+    local vars
+    vars=$(jq -nc --arg sq "$search_query" '{searchQuery: $sq}')
+    nerdgraph_query_vars "$query" "$vars" \
+        | jq '.data.actor.entitySearch' \
+        > "$outdir/entityTags.json"
+    local count
+    count=$(jq '.count // (.results.entities | length) // 0' "$outdir/entityTags.json" 2>/dev/null || echo 0)
+    log_ok "    tagged entities: ${count}"
+    echo "$count"
+}
+
+# =============================================================================
 # RBAC (Users & Groups)
 # =============================================================================
 
@@ -1138,6 +1557,48 @@ generate_manifest() {
             }}' 2>/dev/null || echo "$account_stats")
     done
 
+    # Per-account supplemental stats (folded in from nr-supplemental-export.sh).
+    # Counts are read back from the written files using the same accessors each
+    # extractor uses, so a missing/empty file yields 0 rather than failing.
+    local supplemental_stats="{}"
+    for aid in "${ACCOUNT_IDS[@]}"; do
+        local s="$OUTPUT_DIR/account_${aid}/supplemental"
+        local ai_wf ai_dest muting drop logs lookup e2m tags
+        ai_wf=$(jq '.totalCount // (.entities | length) // 0' "$s/aiWorkflows.json" 2>/dev/null || echo 0)
+        ai_dest=$(jq '.totalCount // (.entities | length) // 0' "$s/aiNotificationsDestinations.json" 2>/dev/null || echo 0)
+        muting=$(jq 'length' "$s/alertsMutingRules.json" 2>/dev/null || echo 0)
+        drop=$(jq '.rules | length' "$s/nrqlDropRules.json" 2>/dev/null || echo 0)
+        logs=$(jq 'length' "$s/logConfigurations.json" 2>/dev/null || echo 0)
+        lookup=$(jq '.lookups | length' "$s/lookupTables.json" 2>/dev/null || echo 0)
+        e2m=$(jq '.rules | length' "$s/eventsToMetricsRules.json" 2>/dev/null || echo 0)
+        tags=$(jq '.count // (.results.entities | length) // 0' "$s/entityTags.json" 2>/dev/null || echo 0)
+        # Guard against non-numeric/empty results (e.g. null) → 0
+        for v in ai_wf ai_dest muting drop logs lookup e2m tags; do
+            [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '%s' 0
+        done
+
+        supplemental_stats=$(echo "$supplemental_stats" | jq \
+            --arg aid "$aid" \
+            --argjson ai_wf "$ai_wf" \
+            --argjson ai_dest "$ai_dest" \
+            --argjson muting "$muting" \
+            --argjson drop "$drop" \
+            --argjson logs "$logs" \
+            --argjson lookup "$lookup" \
+            --argjson e2m "$e2m" \
+            --argjson tags "$tags" \
+            '. + {($aid): {
+                ai_workflows: $ai_wf,
+                ai_notifications_destinations: $ai_dest,
+                alerts_muting_rules: $muting,
+                nrql_drop_rules: $drop,
+                log_parsing_rules: $logs,
+                lookup_tables: $lookup,
+                events_to_metrics_rules: $e2m,
+                entity_tags_matching_filter: $tags
+            }}' 2>/dev/null || echo "$supplemental_stats")
+    done
+
     local accounts_data
     accounts_data=$(cat "$OUTPUT_DIR/_systeminfo/accounts.json" 2>/dev/null || echo "[]")
 
@@ -1172,6 +1633,17 @@ generate_manifest() {
         --argjson export_service_levels "$([[ $EXPORT_SERVICE_LEVELS == true ]] && echo true || echo false)" \
         --argjson include_rbac "$([[ $INCLUDE_RBAC == true ]] && echo true || echo false)" \
         --argjson include_usage "$([[ $INCLUDE_USAGE == true ]] && echo true || echo false)" \
+        --argjson export_ai_workflows "$([[ $EXPORT_AI_WORKFLOWS == true ]] && echo true || echo false)" \
+        --argjson export_ai_destinations "$([[ $EXPORT_AI_DESTINATIONS == true ]] && echo true || echo false)" \
+        --argjson export_muting_rules "$([[ $EXPORT_MUTING_RULES == true ]] && echo true || echo false)" \
+        --argjson export_drop_rules "$([[ $EXPORT_DROP_RULES == true ]] && echo true || echo false)" \
+        --argjson export_log_configs "$([[ $EXPORT_LOG_CONFIGS == true ]] && echo true || echo false)" \
+        --argjson export_lookup_tables "$([[ $EXPORT_LOOKUP_TABLES == true ]] && echo true || echo false)" \
+        --argjson export_events_to_metrics "$([[ $EXPORT_EVENTS_TO_METRICS == true ]] && echo true || echo false)" \
+        --argjson export_entity_tags "$([[ $EXPORT_ENTITY_TAGS == true ]] && echo true || echo false)" \
+        --arg entity_tag_key "$ENTITY_TAG_KEY" \
+        --arg entity_tag_value "$ENTITY_TAG_VALUE" \
+        --argjson supplemental_stats "$supplemental_stats" \
         --argjson account_stats "$account_stats" \
         --argjson accounts "$accounts_data" \
         --argjson files "$files_json" \
@@ -1201,7 +1673,22 @@ generate_manifest() {
             statistics: $account_stats,
             counts: ($account_stats | to_entries | map(.value) | reduce .[] as $a ({}; . + $a)),
             accounts: ($accounts | map(. + {region: $region})),
-            files: $files
+            files: $files,
+            supplemental: {
+                options: {
+                    ai_workflows: $export_ai_workflows,
+                    ai_notifications_destinations: $export_ai_destinations,
+                    alerts_muting_rules: $export_muting_rules,
+                    nrql_drop_rules: $export_drop_rules,
+                    log_parsing_rules: $export_log_configs,
+                    lookup_tables: $export_lookup_tables,
+                    events_to_metrics_rules: $export_events_to_metrics,
+                    entity_tags: $export_entity_tags
+                },
+                entity_tag_filter: { key: $entity_tag_key, value: $entity_tag_value },
+                statistics: $supplemental_stats,
+                counts: ($supplemental_stats | to_entries | map(.value) | reduce .[] as $a ({}; . + $a))
+            }
         }' > "$OUTPUT_DIR/manifest.json" 2>/dev/null
 
     log_ok "Manifest generated"
@@ -1352,6 +1839,67 @@ create_archive() {
     echo "$archive_name"
 }
 
+# Package ONE account into its own self-contained tarball. The DMA model treats a
+# New Relic account as a Dynatrace-tenant-equivalent: one account → one migration
+# scope/target → one DMA project. So the exporter emits one archive PER account
+# (each imports as its own project) rather than one combined multi-account archive.
+#
+# The per-account manifest is sliced from the combined manifest for this account,
+# with `counts` set to this account's own statistics (so each archive's counts are
+# exact — and it sidesteps the multi-account aggregate). Shared/global content
+# (_systeminfo, RBAC users, summary, log) is copied into each archive so it stands
+# alone. Each archive contains exactly one `account_<id>/` tree, which the
+# downstream @dma/newrelic-converter parses unchanged.
+create_account_archive() {
+    local account_id="$1"
+    local timestamp="$2"
+    local parent stage_name stage entry base files_json archive_name
+    parent="$(dirname "$OUTPUT_DIR")"
+    stage_name="dma_newrelic_export_${account_id}_${timestamp}"
+    stage="$parent/$stage_name"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+
+    # This account's asset tree.
+    cp -R "$OUTPUT_DIR/account_${account_id}" "$stage/" 2>>"$LOG_FILE"
+
+    # Shared/global content (anything that isn't another account dir or the
+    # combined manifest) so the per-account archive is self-contained.
+    for entry in "$OUTPUT_DIR"/*; do
+        base="$(basename "$entry")"
+        [[ "$base" == account_* ]] && continue
+        [[ "$base" == manifest.json ]] && continue
+        cp -R "$entry" "$stage/" 2>>"$LOG_FILE"
+    done
+
+    # Per-account manifest: slice the combined manifest for this account; make
+    # counts exact (= this account's statistics). files[] re-globbed for the slice.
+    files_json=$(cd "$stage" && find . -type f \
+        -not -name 'manifest.json' -not -name 'export.log' 2>/dev/null \
+        | sed 's|^\./||' | jq -R . | jq -s '.')
+    jq --arg aid "$account_id" --argjson files "$files_json" '
+        (.statistics[$aid] // {}) as $st
+        | (.supplemental.statistics[$aid] // {}) as $sst
+        | .statistics = { ($aid): $st }
+        | .counts = $st
+        | .source_system.account_ids = [$aid]
+        | .accounts = ((.accounts // []) | map(select((.id | tostring) == $aid)))
+        | .files = $files
+        | .supplemental.statistics = { ($aid): $sst }
+        | .supplemental.counts = $sst
+    ' "$OUTPUT_DIR/manifest.json" > "$stage/manifest.json" 2>>"$LOG_FILE"
+
+    archive_name="dma_export_newrelic_${account_id}_${timestamp}.tar.gz"
+    tar -czf "$archive_name" -C "$parent" "$stage_name" 2>>"$LOG_FILE"
+    rm -rf "$stage"
+
+    if [[ "$ANONYMIZE" == "true" ]]; then
+        anonymize_archive "$archive_name"
+    fi
+
+    echo "$archive_name"
+}
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -1371,7 +1919,8 @@ ${BOLD}TARGETING:${NC}
   --accounts IDS          Comma-separated account IDs (auto-discovers if omitted)
 
 ${BOLD}EXPORT OPTIONS:${NC}
-  --all                   Export dashboards, alerts, synthetics, workloads, service levels
+  --all                   Export EVERYTHING — the 5 core types below + the 8
+                          supplemental types (the full migration corpus)
   --dashboards            Export dashboards and NRQL widget queries
   --alerts                Export alert policies and NRQL conditions
   --synthetics            Export synthetic monitor configurations
@@ -1379,6 +1928,21 @@ ${BOLD}EXPORT OPTIONS:${NC}
   --service-levels        Export service level indicators (SLOs)
   --rbac                  Export users and groups (contains PII — opt-in)
   --usage                 Generate usage analytics via NRQL audit queries (opt-in)
+
+${BOLD}SUPPLEMENTAL OBJECT TYPES (opt in; all included by --all):${NC}
+  --supplemental          Enable all 8 supplemental types below (without core)
+  --ai-workflows          AI/incident workflows
+  --ai-destinations       AI notification destinations
+  --muting-rules          Alert muting rules
+  --drop-rules            NRQL drop rules
+  --log-configs           Log parsing (Grok) rules
+  --lookup-tables         Lookup tables (placeholder)
+  --events-to-metrics     Events-to-metrics rules
+  --entity-tags           Entity tag export
+  --no-<type>             Subtract one of the above from --all/--supplemental
+  --no-supplemental       Subtract all 8 supplemental types from --all
+  --tag-key KEY           entity-tag filter key   (default: team)
+  --tag-value VALUE       entity-tag filter value (default: migration)
 
 ${BOLD}OTHER:${NC}
   --anonymize             Also produce a SHA-256 masked archive (for sharing)
@@ -1419,7 +1983,11 @@ parse_args() {
             --accounts)       IFS=',' read -ra ACCOUNT_IDS <<< "$2"; shift 2 ;;
             --all)            EXPORT_DASHBOARDS=true; EXPORT_ALERTS=true;
                               EXPORT_SYNTHETICS=true; EXPORT_WORKLOADS=true;
-                              EXPORT_SERVICE_LEVELS=true; shift ;;
+                              EXPORT_SERVICE_LEVELS=true;
+                              EXPORT_AI_WORKFLOWS=true; EXPORT_AI_DESTINATIONS=true;
+                              EXPORT_MUTING_RULES=true; EXPORT_DROP_RULES=true;
+                              EXPORT_LOG_CONFIGS=true; EXPORT_LOOKUP_TABLES=true;
+                              EXPORT_EVENTS_TO_METRICS=true; EXPORT_ENTITY_TAGS=true; shift ;;
             --dashboards)     EXPORT_DASHBOARDS=true; shift ;;
             --alerts)         EXPORT_ALERTS=true; shift ;;
             --synthetics)     EXPORT_SYNTHETICS=true; shift ;;
@@ -1427,6 +1995,35 @@ parse_args() {
             --service-levels) EXPORT_SERVICE_LEVELS=true; shift ;;
             --rbac)           INCLUDE_RBAC=true; shift ;;
             --usage)          INCLUDE_USAGE=true; shift ;;
+            # Supplemental object types — opt in (parallel to the core per-type flags).
+            # `--supplemental` enables the whole group; `--<type>` enables one.
+            --supplemental)         EXPORT_AI_WORKFLOWS=true; EXPORT_AI_DESTINATIONS=true;
+                                    EXPORT_MUTING_RULES=true; EXPORT_DROP_RULES=true;
+                                    EXPORT_LOG_CONFIGS=true; EXPORT_LOOKUP_TABLES=true;
+                                    EXPORT_EVENTS_TO_METRICS=true; EXPORT_ENTITY_TAGS=true; shift ;;
+            --ai-workflows)         EXPORT_AI_WORKFLOWS=true; shift ;;
+            --ai-destinations)      EXPORT_AI_DESTINATIONS=true; shift ;;
+            --muting-rules)         EXPORT_MUTING_RULES=true; shift ;;
+            --drop-rules)           EXPORT_DROP_RULES=true; shift ;;
+            --log-configs)          EXPORT_LOG_CONFIGS=true; shift ;;
+            --lookup-tables)        EXPORT_LOOKUP_TABLES=true; shift ;;
+            --events-to-metrics)    EXPORT_EVENTS_TO_METRICS=true; shift ;;
+            --entity-tags)          EXPORT_ENTITY_TAGS=true; shift ;;
+            # ...and opt out individually (subtract from --all / --supplemental).
+            --no-ai-workflows)      EXPORT_AI_WORKFLOWS=false; shift ;;
+            --no-ai-destinations)   EXPORT_AI_DESTINATIONS=false; shift ;;
+            --no-muting-rules)      EXPORT_MUTING_RULES=false; shift ;;
+            --no-drop-rules)        EXPORT_DROP_RULES=false; shift ;;
+            --no-log-configs)       EXPORT_LOG_CONFIGS=false; shift ;;
+            --no-lookup-tables)     EXPORT_LOOKUP_TABLES=false; shift ;;
+            --no-events-to-metrics) EXPORT_EVENTS_TO_METRICS=false; shift ;;
+            --no-entity-tags)       EXPORT_ENTITY_TAGS=false; shift ;;
+            --no-supplemental)      EXPORT_AI_WORKFLOWS=false; EXPORT_AI_DESTINATIONS=false;
+                                    EXPORT_MUTING_RULES=false; EXPORT_DROP_RULES=false;
+                                    EXPORT_LOG_CONFIGS=false; EXPORT_LOOKUP_TABLES=false;
+                                    EXPORT_EVENTS_TO_METRICS=false; EXPORT_ENTITY_TAGS=false; shift ;;
+            --tag-key)        ENTITY_TAG_KEY="$2"; shift 2 ;;
+            --tag-value)      ENTITY_TAG_VALUE="$2"; shift 2 ;;
             --anonymize)      ANONYMIZE=true; shift ;;
             --output-dir)     OUTPUT_DIR="$2"; shift 2 ;;
             --debug)          DEBUG=true; shift ;;
@@ -1532,6 +2129,20 @@ main() {
         [[ "$EXPORT_SYNTHETICS"     == "true" ]] && export_synthetics_for_account     "$account_id"
         [[ "$EXPORT_WORKLOADS"      == "true" ]] && export_workloads_for_account      "$account_id"
         [[ "$EXPORT_SERVICE_LEVELS" == "true" ]] && export_service_levels_for_account "$account_id"
+
+        # Supplemental object types (folded in from nr-supplemental-export.sh).
+        # All write to account_<id>/supplemental/ and are included in the tarball.
+        local supp_dir="$OUTPUT_DIR/account_${account_id}/supplemental"
+        mkdir -p "$supp_dir"
+        [[ "$EXPORT_AI_WORKFLOWS"      == "true" ]] && export_ai_workflows      "$account_id" "$supp_dir"
+        [[ "$EXPORT_AI_DESTINATIONS"   == "true" ]] && export_ai_destinations   "$account_id" "$supp_dir"
+        [[ "$EXPORT_MUTING_RULES"      == "true" ]] && export_muting_rules      "$account_id" "$supp_dir"
+        [[ "$EXPORT_DROP_RULES"        == "true" ]] && export_drop_rules        "$account_id" "$supp_dir"
+        [[ "$EXPORT_LOG_CONFIGS"       == "true" ]] && export_log_configs       "$account_id" "$supp_dir"
+        [[ "$EXPORT_LOOKUP_TABLES"     == "true" ]] && export_lookup_tables     "$account_id" "$supp_dir"
+        [[ "$EXPORT_EVENTS_TO_METRICS" == "true" ]] && export_events_to_metrics "$account_id" "$supp_dir"
+        [[ "$EXPORT_ENTITY_TAGS"       == "true" ]] && export_entity_tags       "$account_id" "$supp_dir"
+
         [[ "$INCLUDE_USAGE"         == "true" ]] && generate_analytics_for_account    "$account_id"
         echo ""
     done
@@ -1539,18 +2150,27 @@ main() {
     # Global exports
     [[ "$INCLUDE_RBAC" == "true" ]] && { export_users; echo ""; }
 
-    # Finalize
+    # Finalize — ONE ARCHIVE PER ACCOUNT (one NR account → one migration
+    # scope/target → one DMA project). generate_manifest builds the combined
+    # manifest first; each per-account archive is sliced from it.
     generate_manifest
     generate_summary
-    local archive_name
-    archive_name=$(create_archive)
+    local pkg_timestamp account_archives=() account_id acct_archive a
+    pkg_timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
+    for account_id in "${ACCOUNT_IDS[@]}"; do
+        acct_archive=$(create_account_archive "$account_id" "$pkg_timestamp")
+        account_archives+=("$acct_archive")
+    done
 
     echo ""
     print_color "$GREEN" "${BOLD}Export complete!${NC}"
-    print_color "$WHITE" "  Archive:  $archive_name"
-    print_color "$WHITE" "  Log:      $LOG_FILE (inside archive)"
+    print_color "$WHITE" "  ${#account_archives[@]} per-account archive(s) — one per New Relic account; import EACH as its own DMA project:"
+    for a in "${account_archives[@]}"; do
+        print_color "$WHITE" "    • $a"
+    done
+    print_color "$WHITE" "  Log:      $LOG_FILE"
     echo ""
-    print_color "$BLUE" "  Next step: Upload $archive_name to the DMA New Relic App in Dynatrace."
+    print_color "$BLUE" "  Next step: Upload each archive to the DMA New Relic App as a separate project."
     echo ""
 
     # Clean up staging directory after all output is complete

@@ -18,6 +18,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.0] - 2026-06-30
+
+### Changed
+
+- **One archive per account (was: one combined multi-account archive).** A multi-account run now emits `dma_export_newrelic_<account_id>_<timestamp>.tar.gz` for **each** account, not a single bundle. Rationale: the DMA treats a New Relic account as a Dynatrace-tenant-equivalent (its own org/team/environment — prod vs nonprod), so each account is a distinct migration scope/target and must be imported as its own DMA project. New `create_account_archive()` packages one account: its `account_<id>/` tree + the shared `_systeminfo`/summary/log + a **single-account `manifest.json` sliced from the combined manifest with exact per-account `counts`** (which also sidesteps the multi-account aggregate-`counts` quirk for the shipped output). `main()` loops it per account. No `@dma/newrelic-converter`/app change — each per-account archive is a valid single-account archive (one `account_<id>/` dir) parsed unchanged.
+
+### Known issues (still open)
+
+- The **combined** manifest's top-level `counts` aggregation (jq `reduce ({}; . + $a)` does object-merge/last-wins, not numeric sum) remains buggy, but is now moot for shipped output — per-account archives set `counts` exactly. Fix the combined aggregation if it's ever consumed directly.
+- PowerShell `.ps1` lacks both the v1.2.0 supplemental types and the v1.3.0 per-account split.
+
+## [1.2.0] - 2026-06-30
+
+### Added
+
+- **Folded the 8 supplemental object types into the primary exporter (sh only); one tarball.** `dma-newrelic-export.sh` now captures the object types that previously required the standalone `nr-supplemental-export.sh`: AI/incident workflows, AI notification destinations, alert muting rules, NRQL drop rules, log parsing (Grok) rules, lookup tables (placeholder pointing at source CSVs), events-to-metrics rules, and entity tags (tag-filtered). They are written to `account_<id>/supplemental/` inside the existing `dma_export_newrelic_<timestamp>.tar.gz` and recorded under a new `supplemental` block in `manifest.json` (per-type options/flags, per-account `statistics`, flattened `counts`, plus the `entity_tag_filter`). Opt in consistently with the core types: `--all` now captures these 8 along with the 5 core types (so `--all` = the full migration corpus), `--supplemental` enables the whole group, and per-type `--ai-workflows` / `--ai-destinations` / `--muting-rules` / `--drop-rules` / `--log-configs` / `--lookup-tables` / `--events-to-metrics` / `--entity-tags` enable one each; the matching `--no-<type>` and `--no-supplemental` flags subtract from `--all`. New `--tag-key` / `--tag-value` flags control the entity-tag filter (default `team=migration`).
+- A new `nerdgraph_query_vars(query, variables)` helper (variables-capable sibling of the existing single-arg `nerdgraph_query`, reusing the same `$GRAPHQL_ENDPOINT`, retry constants, and logging) plus an `account_scoped_query(account_id, body)` string builder support the parameterized supplemental queries. The original single-arg `nerdgraph_query` — the live core-export path — is unchanged.
+
+### Removed
+
+- **`nr-supplemental-export.sh` deleted** — its 8 extractors (v0.2.0) are now part of the primary exporter, so the migration corpus comes from a single script and a single archive. The app's embedded-scripts sync config no longer references it.
+
+### Notes
+
+- The PowerShell port (`dma-newrelic-export.ps1`) does **not** yet include the 8 supplemental object types — that parity work is a separate follow-up.
+
+### Known issues (to fix)
+
+- **🐞 `manifest.json` top-level `counts` aggregate emits all-zeros on real multi-account exports** — both the core `counts` (`dashboards`/`alert_policies`/`synthetic_monitors`/…) **and** the new `supplemental.counts`. Verified on `dma_export_newrelic_20260630T193523Z` (6 accounts): the per-account `statistics` / `supplemental.statistics` blocks are **correct** (e.g. 431 dashboards, 607 synthetics, 522 policies; 440 AI workflows, 572 notification destinations across accounts), but every `counts` value is `0`. The roll-up that should sum `statistics` into `counts` is broken (the core `counts` was already broken pre-combine; the combine's `supplemental.counts` reduce inherits the same problem). **Fix:** populate `counts` by summing the per-account `statistics` (or drop `counts` and have consumers read `statistics`). **Workaround in place downstream:** `dma-newrelic-app` v0.1.90 reads `supplemental.statistics` (summed), not `counts`.
+
 ## [1.1.0] - 2026-06-12
 
 ### Added
