@@ -1,6 +1,6 @@
 # DMA New Relic Export Script
 
-**Version**: 1.3.1
+**Version**: 1.3.3
 **Last Updated**: July 2026
 
 > **Developed for Dynatrace One by Enterprise Solutions & Architecture**

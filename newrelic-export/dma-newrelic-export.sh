@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.3.1
+#  DMA New Relic Export Script v1.3.3
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -95,7 +95,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.1"
+readonly SCRIPT_VERSION="1.3.3"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -112,15 +112,15 @@ readonly ENTITY_FETCH_BATCH=25
 # ANSI COLOR CODES
 # =============================================================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
-GRAY='\033[0;90m'
-NC='\033[0m'
-BOLD='\033[1m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+WHITE=$'\033[1;37m'
+GRAY=$'\033[0;90m'
+NC=$'\033[0m'
+BOLD=$'\033[1m'
 
 BOX_TL="╔"; BOX_TR="╗"; BOX_BL="╚"; BOX_BR="╝"
 BOX_H="═"; BOX_V="║"; BOX_T="╠"; BOX_B="╣"
@@ -963,24 +963,79 @@ export_service_levels_for_account() {
 
     log_info "  [Account $account_id] Exporting service level indicators..."
 
+    # Service levels are entities (type = 'SERVICE_LEVEL', domain 'EXT') — the
+    # entity itself IS the SLI. There is no Account.serviceLevel field; the
+    # real path is entity.serviceLevel (ServiceLevelDefinition) → indicators
+    # (a list of ServiceLevelIndicator, confirmed via NerdGraph introspection
+    # 2026-07-06). Two-phase pattern matches dashboards/synthetics/workloads.
+
+    # Phase 1 — discover GUIDs via entitySearch
     local cursor="null"
-    local all_indicators="[]"
-    local query_failed=false
+    local all_guids="[]"
     local page=1
+    local query_failed=false
 
     while true; do
         local cursor_arg=""
-        [[ "$cursor" != "null" ]] && cursor_arg="(cursor: $cursor)"
+        [[ "$cursor" != "null" ]] && cursor_arg=", cursor: $cursor"
 
         local query
         query=$(cat <<GRAPHQL
 {
   actor {
-    account(id: ${account_id}) {
-      serviceLevel {
-        indicators${cursor_arg} {
-          nextCursor
-          objects {
+    entitySearch(query: "type = 'SERVICE_LEVEL' AND accountId = ${account_id}"${cursor_arg}) {
+      results {
+        entities {
+          ... on ExternalEntityOutline { guid }
+        }
+        nextCursor
+      }
+    }
+  }
+}
+GRAPHQL
+)
+        local response
+        if ! response=$(nerdgraph_query "$query"); then
+            log_error "  [Account $account_id] Service level entitySearch failed after retries (page $page)"
+            query_failed=true
+            break
+        fi
+
+        local page_guids next_cursor
+        page_guids=$(echo "$response" | jq '[.data.actor.entitySearch.results.entities[].guid // empty]' 2>/dev/null || echo "[]")
+        next_cursor=$(echo "$response" | jq '.data.actor.entitySearch.results.nextCursor' 2>/dev/null || echo "null")
+
+        log_debug "    Page $page: $(echo "$page_guids" | jq 'length' 2>/dev/null || echo 0) SLI GUIDs"
+
+        all_guids=$(json_merge_arrays "$all_guids" "$page_guids")
+
+        cursor="$next_cursor"
+        [[ "$cursor" == "null" ]] && break
+        page=$((page + 1))
+        sleep "$API_DELAY"
+    done
+
+    # Phase 2 — batch-fetch full indicator details
+    local guid_count
+    guid_count=$(echo "$all_guids" | jq 'length' 2>/dev/null || echo 0)
+    log_debug "    Phase 1 complete: $guid_count SLI GUIDs"
+
+    local all_indicators="[]"
+    local start=0 batch_num=1
+    while [[ "$query_failed" != "true" && $start -lt $guid_count ]]; do
+        local guids_literal
+        guids_literal=$(echo "$all_guids" | jq ".[${start}:$((start + ENTITY_FETCH_BATCH))]" 2>/dev/null || echo "[]")
+
+        local detail_query
+        detail_query=$(cat <<GRAPHQL
+{
+  actor {
+    entities(guids: ${guids_literal}) {
+      ... on ExternalEntity {
+        guid
+        serviceLevel {
+          indicators {
             id name description guid entityGuid createdAt updatedAt
             events {
               validEvents { from where }
@@ -999,26 +1054,23 @@ export_service_levels_for_account() {
 }
 GRAPHQL
 )
-        local response
-        if ! response=$(nerdgraph_query "$query"); then
-            log_error "  [Account $account_id] Service level indicators query failed after retries (page $page)"
+        local detail_response
+        if ! detail_response=$(nerdgraph_query "$detail_query"); then
+            log_error "  [Account $account_id] Service level indicator detail fetch failed after retries (batch $batch_num)"
             query_failed=true
             break
         fi
 
-        local page_items next_cursor
-        page_items=$(echo "$response" | jq '.data.actor.account.serviceLevel.indicators.objects // []' 2>/dev/null || echo "[]")
-        next_cursor=$(echo "$response" | jq '.data.actor.account.serviceLevel.indicators.nextCursor' 2>/dev/null || echo "null")
+        local batch_items
+        batch_items=$(echo "$detail_response" | jq '[.data.actor.entities[]? | select(. != null) | (.serviceLevel.indicators // [])[]]' 2>/dev/null || echo "[]")
+        local batch_count
+        batch_count=$(echo "$batch_items" | jq 'length' 2>/dev/null || echo 0)
+        log_debug "    Batch $batch_num: fetched $batch_count SLI details"
 
-        local page_count
-        page_count=$(echo "$page_items" | jq 'length' 2>/dev/null || echo 0)
-        log_debug "    Page $page: $page_count SLIs"
+        all_indicators=$(json_merge_arrays "$all_indicators" "$batch_items")
 
-        all_indicators=$(json_merge_arrays "$all_indicators" "$page_items")
-
-        cursor="$next_cursor"
-        [[ "$cursor" == "null" ]] && break
-        page=$((page + 1))
+        start=$((start + ENTITY_FETCH_BATCH))
+        batch_num=$((batch_num + 1))
         sleep "$API_DELAY"
     done
 

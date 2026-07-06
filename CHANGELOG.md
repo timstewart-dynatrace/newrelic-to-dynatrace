@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.3] - 2026-07-06
+
+### Fixed
+
+- **Service level export: query still failed after the v1.3.1 fix** — `actor.account(id:).serviceLevel` is not a valid field on `Account` at all (confirmed via live NerdGraph introspection against account 8018100: `Cannot query field "serviceLevel" on type "Account"`). Service levels are entities (`type = 'SERVICE_LEVEL'`, `domain = 'EXT'`, concrete GraphQL type `ExternalEntity`) — the entity itself IS the SLI, not a sub-object reachable from the account. Rewrote `export_service_levels_for_account()` to use the same two-phase `entitySearch → entities(guids:)` pattern as `export_dashboards_for_account()`/`export_synthetics_for_account()`/`export_workloads_for_account()`: Phase 1 discovers `SERVICE_LEVEL` entity GUIDs via `entitySearch`; Phase 2 batch-fetches `... on ExternalEntity { serviceLevel { indicators { id name description guid entityGuid createdAt updatedAt events{...} objectives{...} } } }` (introspection confirmed `ServiceLevelDefinition.indicators` is a list — the v1.3.1 query's leaf fields for `events`/`objectives`/`timeWindow.rolling` were already correctly shaped; only the top-level path and one nesting level were wrong). Validated live: account 8018100's 5 real SLOs now export correctly with intact `events` + `objectives`.
+
+## [1.3.2] - 2026-07-06
+
+### Fixed
+
+- **`usage()`/`--help` printed literal `\033[1m` escape codes instead of bold/color text.** The `RED`/`GREEN`/`YELLOW`/`BLUE`/`CYAN`/`WHITE`/`GRAY`/`NC`/`BOLD` variables were defined with single-quoted strings (`RED='\033[0;31m'`) — that stores the four literal characters `\`, `0`, `3`, `3`, not a real ESC byte. `print_color()`/`print_header()` (used everywhere except `usage()`) mask this because they print via `echo -e`, which interprets a literal `\033` as an octal escape. `usage()` prints via a plain `cat <<EOF` heredoc, which does no escape interpretation, so it dumped the raw text. Switched all 9 color variables to ANSI-C quoting (`$'\033[0;31m'`) so they hold a real ESC byte — `cat` now renders correctly, and `echo -e` is unaffected (a real ESC byte passes through untouched). Reported after downloading the script via the DMA New Relic App.
+
 ## [1.3.1] - 2026-07-06
 
 ### Fixed
