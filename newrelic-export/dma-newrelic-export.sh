@@ -9,7 +9,7 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.3.0
+#  DMA New Relic Export Script v1.3.1
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -95,7 +95,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.3.1"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -347,9 +347,9 @@ nerdgraph_query() {
         fi
     done
 
-    log_warn "API request failed after $API_RETRY_COUNT attempts"
+    log_error "API request failed after $API_RETRY_COUNT attempts"
     echo "{}"
-    return 0
+    return 1
 }
 
 # Execute a NerdGraph query that takes GraphQL variables. This is the
@@ -394,11 +394,11 @@ nerdgraph_query_vars() {
                 fi
                 log_warn "GraphQL errors (attempt $((attempt+1))/$API_RETRY_COUNT)"
                 log_debug "Response: $body"
-                # On the final attempt, return whatever body exists so partial
-                # results (and any data block) are still saved by the caller.
+                # On the final attempt, emit the body (callers may log it for
+                # diagnosis) but return 1 so hard failures are never silent.
                 if [[ $((attempt + 1)) -ge $API_RETRY_COUNT ]]; then
                     echo "$body"
-                    return 0
+                    return 1
                 fi
                 ;;
             401)
@@ -423,9 +423,9 @@ nerdgraph_query_vars() {
         fi
     done
 
-    log_warn "API request failed after $API_RETRY_COUNT attempts"
+    log_error "API request failed after $API_RETRY_COUNT attempts"
     echo "{}"
-    return 0
+    return 1
 }
 
 # Wraps `actor.account(id: $id) { ... }` around a body — saves repeating the
@@ -963,9 +963,10 @@ export_service_levels_for_account() {
 
     log_info "  [Account $account_id] Exporting service level indicators..."
 
-    # Use the dedicated serviceLevel.indicators query (more efficient than scanning all entities)
     local cursor="null"
     local all_indicators="[]"
+    local query_failed=false
+    local page=1
 
     while true; do
         local cursor_arg=""
@@ -982,7 +983,6 @@ export_service_levels_for_account() {
           objects {
             id name description guid entityGuid createdAt updatedAt
             events {
-              account { id name }
               validEvents { from where }
               goodEvents  { from where }
               badEvents   { from where }
@@ -1000,7 +1000,11 @@ export_service_levels_for_account() {
 GRAPHQL
 )
         local response
-        response=$(nerdgraph_query "$query")
+        if ! response=$(nerdgraph_query "$query"); then
+            log_error "  [Account $account_id] Service level indicators query failed after retries (page $page)"
+            query_failed=true
+            break
+        fi
 
         local page_items next_cursor
         page_items=$(echo "$response" | jq '.data.actor.account.serviceLevel.indicators.objects // []' 2>/dev/null || echo "[]")
@@ -1008,18 +1012,23 @@ GRAPHQL
 
         local page_count
         page_count=$(echo "$page_items" | jq 'length' 2>/dev/null || echo 0)
-        log_debug "    Page: $page_count SLIs"
+        log_debug "    Page $page: $page_count SLIs"
 
         all_indicators=$(json_merge_arrays "$all_indicators" "$page_items")
 
         cursor="$next_cursor"
         [[ "$cursor" == "null" ]] && break
+        page=$((page + 1))
         sleep "$API_DELAY"
     done
 
     echo "$all_indicators" | jq '.' > "$out_dir/indicators.json" 2>/dev/null || echo "[]" > "$out_dir/indicators.json"
     local total
     total=$(count_json_array_file "$out_dir/indicators.json")
+    if [[ "$query_failed" == "true" ]]; then
+        log_error "  [Account $account_id] Exported $total service level indicators (INCOMPLETE — query failed)"
+        return 1
+    fi
     log_ok "  [Account $account_id] Exported $total service level indicators"
 }
 

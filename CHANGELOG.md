@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.1] - 2026-07-06
+
+### Fixed
+
+- **Service level export: broken GraphQL query.** `export_service_levels_for_account()` requested `events { account { id name } ... }` — the `account` sub-field does not exist on the `events` type in NR's SLI schema, causing a GraphQL schema error (HTTP 200 with `errors` array) on every attempt. Removed the invalid field; all other SLI fields (`validEvents`/`goodEvents`/`badEvents` + `objectives`) are unaffected.
+- **Failure masking in `nerdgraph_query()` and `nerdgraph_query_vars()`.** After exhausting retries on repeated GraphQL errors, both functions returned exit code 0 (`return 0`) — indistinguishable from success — so callers wrote `[]` and logged `[OK] 0` even on hard failures. Both now `return 1` (and log `ERROR` instead of `WARN`) so callers can detect and surface the failure. The final-attempt body echo in `nerdgraph_query_vars()` is preserved for diagnostics but now also returns 1.
+- **Service level caller now detects query failure.** `export_service_levels_for_account()` checks the return code of `nerdgraph_query` on each page; on failure it logs `ERROR`, writes whatever partial data was collected, and itself returns 1 — preventing the false `[OK] 0 indicators` log line.
+
 ## [1.3.0] - 2026-06-30
 
 ### Changed
