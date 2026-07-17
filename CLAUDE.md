@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Key paths
 
-- **Export scripts**: `newrelic-export/dma-newrelic-export.sh` (canonical, **v1.3.0** — emits **one archive per account** [`dma_export_newrelic_<account_id>_<timestamp>.tar.gz`; account = DT-tenant-equivalent → its own DMA project]; folds in the 8 supplemental object types [v1.2.0] formerly in `nr-supplemental-export.sh`; opt in via `--all`/`--supplemental`/`--<type>`), `.ps1` (Windows port, v1.0.2 — **supplemental + per-account parity are pending follow-ups**). The standalone `nr-supplemental-export.sh` was removed in v1.2.0.
+- **Export scripts**: `newrelic-export/dma-newrelic-export.sh` (canonical, **v1.3.3** — emits **one archive per account** [`dma_export_newrelic_<account_id>_<timestamp>.tar.gz`; account = DT-tenant-equivalent → its own DMA project]; folds in the 8 supplemental object types [v1.2.0] formerly in `nr-supplemental-export.sh`; opt in via `--all`/`--supplemental`/`--<type>`), `.ps1` (Windows port, v1.0.2 — **supplemental + per-account parity are pending follow-ups**). The standalone `nr-supplemental-export.sh` was removed in v1.2.0.
 - **Docs**: `newrelic-export/docs_markdown/` + `docs_html/` (built via `build-docs.sh`)
 - **Decisions / history**: `DECISIONS.md`, `CHANGELOG.md`
 - Sample archives (`dma_export_newrelic_*.tar.gz`) at the repo root are test fixtures for downstream converter work
@@ -21,4 +21,4 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Version lives in `README.md` header (must match `SCRIPT_VERSION` in the `.sh`); update `CHANGELOG.md` with every script change; tag releases (`vX.Y.Z`, annotated)
 - Branch-per-feature (`feature/…`, `fix/…`); `main` is the stable export script customers receive; abandoned work is archive-tagged (`archive/…`), not left as branches
 - Export shape changes ripple downstream: `@dma/newrelic-converter`'s `ArchiveParser`/fixtures and the NR app's import path must be checked against any new/renamed archive entry
-- **The scripts are embedded in `dma-newrelic-app` for in-app download** (Export Scripts page). After every script release here, regenerate the app's embedded copy: `npm run sync-export-scripts` in `dma-newrelic-app` (reads this checkout), commit the regenerated `ui/app/constants/exportScripts.ts`
+- **The scripts are embedded in `dma-newrelic-app` for in-app download** (downloaded from the app's **Import page** — there is no standalone Export Scripts page). After every script release here, regenerate the app's embedded copy: `npm run sync-export-scripts` in `dma-newrelic-app` (reads this checkout), commit the regenerated `ui/app/constants/exportScripts.ts`
