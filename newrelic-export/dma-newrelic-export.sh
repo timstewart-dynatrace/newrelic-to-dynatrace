@@ -95,7 +95,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.3"
+readonly SCRIPT_VERSION="1.3.4"
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -846,7 +846,19 @@ GRAPHQL
         sleep "$API_DELAY"
     done
 
-    echo "$all_monitors" | jq '.' > "$out_dir/monitors.json" 2>/dev/null || echo "[]" > "$out_dir/monitors.json"
+    # NerdGraph's SyntheticMonitorEntity has no dedicated locations field — the
+    # only place a monitor's run locations appear is the `publicLocation` tag
+    # (one value per location). Lift it into a `locations: [{label}, ...]`
+    # array so the converter's `monitor.locations.map(l => l.label)` (which
+    # already expects this exact label-based shape — see
+    # dma-newrelic-converter's SyntheticApiMapper.ts, which remaps labels to
+    # Dynatrace location IDs at publish time, not export time) has something
+    # to read. Monitors with no `publicLocation` tag get `locations: []`.
+    echo "$all_monitors" | jq '
+        map(. + {
+            locations: [(.tags // [])[] | select(.key == "publicLocation") | .values[]? | {label: .}]
+        })
+    ' > "$out_dir/monitors.json" 2>/dev/null || echo "[]" > "$out_dir/monitors.json"
     local total
     total=$(count_json_array_file "$out_dir/monitors.json")
     log_ok "  [Account $account_id] Exported $total synthetic monitors"

@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.4] - 2026-08-07
+
+### Fixed
+
+- **Synthetic monitors export with no usable `locations` field.** `NerdGraph`'s `SyntheticMonitorEntity` has no dedicated locations field — a monitor's run location(s) only ever appear as a `publicLocation` tag (verified live against account 8018100: all 9 monitors carry real location values there, e.g. `["Washington, DC, USA", "Dublin, IE"]`). The export previously wrote `tags` straight through and never lifted this into a proper field, so every exported monitor looked location-less downstream even though the data was present in the archive the whole time — `@dma/newrelic-converter`'s `SyntheticConverter` reads `monitor.locations.map(l => l.label)`, a field this shape never populated. `export_synthetics_for_account()` now post-processes the `tags` array into `locations: [{label: "..."}]` right before writing `monitors.json`, matching the label-based shape the converter already expects (labels get remapped to Dynatrace location IDs at publish time, not export time — see `@dma/newrelic-converter`'s `SyntheticApiMapper.ts`). No GraphQL query change, no new NerdGraph field — the underlying data was already being fetched.
+
 ## [1.3.3] - 2026-07-06
 
 ### Fixed
