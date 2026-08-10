@@ -18,6 +18,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.6] - 2026-08-10
+
+### Fixed
+
+- **🔴 Synthetic monitors on PRIVATE locations still exported with empty `locations`.** v1.3.4 lifted the `publicLocation` tag into a `locations` array, which was correct but incomplete: New Relic records run locations under **two** tag keys, and v1.3.4 read only one. On real customer data this covered **79 of 616 monitors (12.8%)** — every one of the other 537 carried a `privateLocation` tag instead, so the exact symptom v1.3.4 set out to fix persisted at customer scale under a different key. (v1.3.4 looked correct because the test accounts it was verified against are public-location-only: 9/9, 6/6, 1/1.)
+
+  `export_synthetics_for_account()` now lifts **both** keys into `locations: [{label, type}]`, public entries first, then private. Re-derived against the real archives: **616 of 616 monitors (100%)** now carry usable locations, including the one monitor that legitimately runs from both a public and a private location.
+
+  The new `type` discriminator (`"public"` / `"private"`) is additive — existing consumers reading only `.label` (`@dma/newrelic-converter`'s `SyntheticConverter.ts:50`) are unaffected. It exists because the two are **not** interchangeable downstream: a public label can be remapped to a Dynatrace public location at publish time (`SyntheticApiMapper.ts`), whereas a private NR location names a customer-hosted minion with no Dynatrace public equivalent and must be mapped to a DT private synthetic location the customer selects. Publishing a private-location monitor still needs that mapping decision — this change makes the requirement visible instead of silently emitting an unrunnable monitor.
+
+### Changed
+
+- **The header banner now carries the version, and can no longer drift silently.** The banner comment is what a human reads when they open the file, but it was hand-maintained separately from `SCRIPT_VERSION` and showed **v1.3.3 for the entire v1.3.4 release**. The banner now has an explicit `Version: vX.Y.Z` line, and the script compares it to `SCRIPT_VERSION` at startup, warning on stderr if they disagree. Deliberately non-fatal — a stale banner must never block a customer's export.
+
+## [1.3.5] - 2026-08-10
+
+### Fixed
+
+- **🔴 `entitySearch` pagination never advanced past page 1 — dashboards, synthetic monitors, workloads and service levels all silently truncated at 200 per account.** The pagination cursor was passed as an argument to `entitySearch(query: …, cursor: …)`, but NerdGraph accepts the cursor on the nested **`results(cursor:)`** field, not on `entitySearch` itself. The loop therefore read a `nextCursor` it could never use, and exited after one page. **Nothing reported an error** — the collectors logged `Exported 200 dashboards` as a success, so the truncation was invisible in both the log and the archive.
+
+  **How it was caught (2026-08-10):** two unrelated accounts in a customer export reported *exactly* 200 dashboards **and** *exactly* 200 synthetic monitors, while the alert collectors in this same script — which put the cursor in the correct position (`policiesSearch(cursor:)`, `nrqlConditionsSearch(cursor:)`) — returned 336/174 policies and 2,289/2,156 NRQL conditions with no cap. Four round numbers across two accounts and two asset types is not a coincidence; the working alert path was the control.
+
+  **Impact:** any account with more than 200 of a given asset type exported an incomplete archive, and every downstream conversion/deploy-rate metric computed on such an archive used a truncated denominator. **Re-export any account that reported exactly 200 of anything.**
+
+  Fixed in all four collectors — `export_dashboards_for_account` (`:525`), `export_synthetics_for_account` (`:787`), `export_workloads_for_account` (`:905`), `export_service_levels_for_account` (`:1017`). The three that previously ignored a failed query now `log_error` and stop with an explicit **"export is INCOMPLETE"** rather than treating an API failure as a clean end-of-pagination (service levels already did this).
+
+### Known issues
+
+- **`export_entity_tags` has the same truncation, unfixed.** It issues a single `entitySearch` and selects `nextCursor` but has no pagination loop at all, so it caps at one page. Left as-is deliberately: `entity-tags` is one of the 8 `--supplemental` types with zero downstream consumers today (no parsing, no conversion — see the DMA parity backlog), and fixing it means restructuring the function rather than moving an argument. Fix it when supplemental types get real downstream code (M6).
+- **The PowerShell port carries the identical bug** — `dma-newrelic-export.ps1` v1.0.2 passes `$cursorArg` to `entitySearch(...)` for dashboards (`:278`) and monitors (`:467`). Not fixed here; the `.ps1` is already behind on supplemental + per-account parity and its in-app download stays hidden until that lands.
+
+## [1.3.4] - 2026-08-07
+
+### Fixed
+
+- **Synthetic monitors export with no usable `locations` field.** `NerdGraph`'s `SyntheticMonitorEntity` has no dedicated locations field — a monitor's run location(s) only ever appear as a `publicLocation` tag (verified live against account 8018100: all 9 monitors carry real location values there, e.g. `["Washington, DC, USA", "Dublin, IE"]`). The export previously wrote `tags` straight through and never lifted this into a proper field, so every exported monitor looked location-less downstream even though the data was present in the archive the whole time — `@dma/newrelic-converter`'s `SyntheticConverter` reads `monitor.locations.map(l => l.label)`, a field this shape never populated. `export_synthetics_for_account()` now post-processes the `tags` array into `locations: [{label: "..."}]` right before writing `monitors.json`, matching the label-based shape the converter already expects (labels get remapped to Dynatrace location IDs at publish time, not export time — see `@dma/newrelic-converter`'s `SyntheticApiMapper.ts`). No GraphQL query change, no new NerdGraph field — the underlying data was already being fetched.
+
 ## [1.3.3] - 2026-07-06
 
 ### Fixed

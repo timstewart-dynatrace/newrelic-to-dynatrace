@@ -9,7 +9,13 @@ fi
 
 ################################################################################
 #
-#  DMA New Relic Export Script v1.3.3
+#  DMA New Relic Export Script
+#
+#  Version: v1.3.6            Released: 2026-08-10
+#
+#  (This line and the SCRIPT_VERSION constant are checked against each other at
+#   startup — if they ever disagree the script says so on stderr. The banner
+#   silently drifted once, showing v1.3.3 while the script actually ran v1.3.4.)
 #
 #  NerdGraph GraphQL Data Collection for New Relic to Dynatrace Migration
 #
@@ -95,7 +101,21 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.3"
+readonly SCRIPT_VERSION="1.3.6"
+
+# Banner/constant drift guard. The header comment is what a human reads when
+# they open this file, so it must not silently disagree with what actually runs
+# (it did: the banner said v1.3.3 for the whole v1.3.4 release). Non-fatal by
+# design — a version mismatch must never block a customer's export.
+if [[ -r "${BASH_SOURCE[0]}" ]]; then
+    _banner_version=$(grep -m1 -E '^#[[:space:]]+Version:[[:space:]]+v?[0-9]+\.[0-9]+\.[0-9]+' "${BASH_SOURCE[0]}" 2>/dev/null \
+        | sed -E 's/.*[Vv]ersion:[[:space:]]*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+    if [[ -n "$_banner_version" && "$_banner_version" != "$SCRIPT_VERSION" ]]; then
+        echo "WARNING: header banner says v${_banner_version} but this script runs v${SCRIPT_VERSION}." >&2
+        echo "         The banner is stale — update it. Exports are unaffected." >&2
+    fi
+    unset _banner_version
+fi
 readonly SCHEMA_VERSION="1.0"
 readonly SCRIPT_NAME="DMA New Relic Export"
 readonly SCRIPT_START_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -511,15 +531,19 @@ export_dashboards_for_account() {
     local page=1
 
     while true; do
+        # NerdGraph takes the pagination cursor on the nested `results` field,
+        # NOT on `entitySearch(...)`. Passing it to entitySearch is silently
+        # ineffective: page 2 is never fetched and the export truncates at one
+        # page (200 entities) with no error. See CHANGELOG v1.3.5.
         local cursor_arg=""
-        [[ "$cursor" != "null" ]] && cursor_arg=", cursor: $cursor"
+        [[ "$cursor" != "null" ]] && cursor_arg="(cursor: $cursor)"
 
         local query
         query=$(cat <<GRAPHQL
 {
   actor {
-    entitySearch(query: "type = 'DASHBOARD' AND accountId = ${account_id}"${cursor_arg}) {
-      results {
+    entitySearch(query: "type = 'DASHBOARD' AND accountId = ${account_id}") {
+      results${cursor_arg} {
         entities {
           ... on DashboardEntityOutline { guid }
         }
@@ -531,7 +555,10 @@ export_dashboards_for_account() {
 GRAPHQL
 )
         local response
-        response=$(nerdgraph_query "$query")
+        if ! response=$(nerdgraph_query "$query"); then
+            log_error "  [Account $account_id] Dashboard entitySearch failed after retries (page $page) — export is INCOMPLETE"
+            break
+        fi
 
         local page_guids next_cursor
         page_guids=$(echo "$response" | jq '[.data.actor.entitySearch.results.entities[].guid // empty]' 2>/dev/null || echo "[]")
@@ -768,15 +795,17 @@ export_synthetics_for_account() {
     local page=1
 
     while true; do
+        # Cursor belongs on `results`, not on `entitySearch` — see the dashboard
+        # collector above and CHANGELOG v1.3.5.
         local cursor_arg=""
-        [[ "$cursor" != "null" ]] && cursor_arg=", cursor: $cursor"
+        [[ "$cursor" != "null" ]] && cursor_arg="(cursor: $cursor)"
 
         local query
         query=$(cat <<GRAPHQL
 {
   actor {
-    entitySearch(query: "type = 'MONITOR' AND accountId = ${account_id}"${cursor_arg}) {
-      results {
+    entitySearch(query: "type = 'MONITOR' AND accountId = ${account_id}") {
+      results${cursor_arg} {
         entities {
           ... on SyntheticMonitorEntityOutline { guid }
         }
@@ -788,7 +817,10 @@ export_synthetics_for_account() {
 GRAPHQL
 )
         local response
-        response=$(nerdgraph_query "$query")
+        if ! response=$(nerdgraph_query "$query"); then
+            log_error "  [Account $account_id] Synthetic monitor entitySearch failed after retries (page $page) — export is INCOMPLETE"
+            break
+        fi
 
         local page_guids next_cursor
         page_guids=$(echo "$response" | jq '[.data.actor.entitySearch.results.entities[].guid // empty]' 2>/dev/null || echo "[]")
@@ -846,7 +878,33 @@ GRAPHQL
         sleep "$API_DELAY"
     done
 
-    echo "$all_monitors" | jq '.' > "$out_dir/monitors.json" 2>/dev/null || echo "[]" > "$out_dir/monitors.json"
+    # NerdGraph's SyntheticMonitorEntity has no dedicated locations field — a
+    # monitor's run locations appear ONLY as tags, under two different keys:
+    #   publicLocation  — NR-hosted, e.g. "Washington, DC, USA"
+    #   privateLocation — customer-hosted minion, e.g. "USFOODS Prod"
+    # Lift BOTH into a `locations: [{label, type}, ...]` array so the converter's
+    # `monitor.locations.map(l => l.label)` (see dma-newrelic-converter's
+    # SyntheticConverter.ts:50) has something to read.
+    #
+    # v1.3.4 read publicLocation only, which looked correct on test accounts but
+    # missed 537 of 616 monitors on real customer data — every one of them was
+    # private-location-only. Public first, then private (a monitor can carry
+    # both; one real example does).
+    #
+    # `type` is additive and exists because the two are NOT interchangeable
+    # downstream: a public label can be remapped to a Dynatrace public location
+    # at publish time (SyntheticApiMapper.ts), but a private NR location names a
+    # customer-hosted minion with no Dynatrace public equivalent — it has to be
+    # mapped to a DT private synthetic location the customer selects. Existing
+    # consumers that only read `.label` are unaffected.
+    echo "$all_monitors" | jq '
+        map(. + {
+            locations: (
+                  [(.tags // [])[] | select(.key == "publicLocation")  | .values[]? | {label: ., type: "public"}]
+                + [(.tags // [])[] | select(.key == "privateLocation") | .values[]? | {label: ., type: "private"}]
+            )
+        })
+    ' > "$out_dir/monitors.json" 2>/dev/null || echo "[]" > "$out_dir/monitors.json"
     local total
     total=$(count_json_array_file "$out_dir/monitors.json")
     log_ok "  [Account $account_id] Exported $total synthetic monitors"
@@ -869,15 +927,17 @@ export_workloads_for_account() {
     local page=1
 
     while true; do
+        # Cursor belongs on `results`, not on `entitySearch` — see the dashboard
+        # collector above and CHANGELOG v1.3.5.
         local cursor_arg=""
-        [[ "$cursor" != "null" ]] && cursor_arg=", cursor: $cursor"
+        [[ "$cursor" != "null" ]] && cursor_arg="(cursor: $cursor)"
 
         local query
         query=$(cat <<GRAPHQL
 {
   actor {
-    entitySearch(query: "type = 'WORKLOAD' AND accountId = ${account_id}"${cursor_arg}) {
-      results {
+    entitySearch(query: "type = 'WORKLOAD' AND accountId = ${account_id}") {
+      results${cursor_arg} {
         entities {
           ... on WorkloadEntityOutline { guid }
         }
@@ -889,7 +949,10 @@ export_workloads_for_account() {
 GRAPHQL
 )
         local response
-        response=$(nerdgraph_query "$query")
+        if ! response=$(nerdgraph_query "$query"); then
+            log_error "  [Account $account_id] Workload entitySearch failed after retries (page $page) — export is INCOMPLETE"
+            break
+        fi
 
         local page_guids next_cursor
         page_guids=$(echo "$response" | jq '[.data.actor.entitySearch.results.entities[].guid // empty]' 2>/dev/null || echo "[]")
@@ -976,15 +1039,17 @@ export_service_levels_for_account() {
     local query_failed=false
 
     while true; do
+        # Cursor belongs on `results`, not on `entitySearch` — see the dashboard
+        # collector above and CHANGELOG v1.3.5.
         local cursor_arg=""
-        [[ "$cursor" != "null" ]] && cursor_arg=", cursor: $cursor"
+        [[ "$cursor" != "null" ]] && cursor_arg="(cursor: $cursor)"
 
         local query
         query=$(cat <<GRAPHQL
 {
   actor {
-    entitySearch(query: "type = 'SERVICE_LEVEL' AND accountId = ${account_id}"${cursor_arg}) {
-      results {
+    entitySearch(query: "type = 'SERVICE_LEVEL' AND accountId = ${account_id}") {
+      results${cursor_arg} {
         entities {
           ... on ExternalEntityOutline { guid }
         }
