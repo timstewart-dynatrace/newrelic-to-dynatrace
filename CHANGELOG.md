@@ -18,6 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.7] - 2026-11-05
+
+### Fixed
+
+- **🔴 Alert conditions exported with no thresholds.** The `nrqlConditionsSearch` query selected only `id name description enabled entityGuid policyId nrql expiration`. It never selected `type`, `terms`, `signal`, `runbookUrl` or `violationTimeLimitSeconds`, although `EXPORT-SCHEMA.md` documented all of them. Downstream, every condition read as `threshold: null`. `@dma/newrelic-converter` fell back to threshold `0`, a 60 s duration and the CRITICAL priority (`AlertConverter.ts:134-136`). Its alert-pool routing (`alertPool.ts:conditionIntervalMinutes`) never saw `signal.aggregationWindow`, so every condition defaulted to a Davis anomaly detector.
+
+  The query now selects all five fields, plus `baselineDirection` for baseline conditions and `expectedGroups` / `openViolationOnGroupOverlap` for outlier conditions (inline fragments).
+
+  **Verified against NerdGraph** on test account 8018100 (47 conditions: 42 static, 5 baseline):
+  - the top-level `terms` selection is accepted for every condition type, so no per-type fragments are needed for it
+  - all 47 conditions now export `terms`, with 0 null thresholds
+  - all 47 export `signal.aggregationWindow`
+  - all 5 baselines export `baselineDirection`
+
+  The additive fields need no `ArchiveParser` change: `normalizeCondition()` in `alertAssembly.ts` already maps `type`, `terms`, `signal` and `violationTimeLimitSeconds`.
+
+  ⚠️ **Downstream consequence:** a baseline condition's `terms[].threshold` is a number of standard deviations. A converter that treats it as a static threshold will produce a wrong detector. One test-account example is LOWER_ONLY "Throughput drop anomaly", which would become `ABOVE 4`.
+
+- **🔴 `dma-newrelic-export.ps1` did not parse (v1.0.2).** Six `Log-Debug` strings wrote `"$page:"` / `"$batchNum:"`. PowerShell reads `$name:` as a scope-qualified variable, so the whole script failed with a `ParserError` before running anything. Now written as `${page}:` / `${batchNum}:` (`.ps1` v1.0.3). Verified with `pwsh` 0 parse errors and a live run that exports 47 conditions with terms.
+
+### Known issues
+
+- **`.ps1` service-level export still fails.** It queries `account.serviceLevel`, which NerdGraph rejects ("Cannot query field serviceLevel on type Account"; the bash script moved to the entity-based shape in v1.3.3). With `-All` or `-ServiceLevels`, the script throws after the retries (`The property 'Count' cannot be found`) and writes no archive. `-Dashboards -Alerts -Synthetics -Workloads` runs complete.
+
 ## [1.3.6] - 2026-08-10
 
 ### Fixed
