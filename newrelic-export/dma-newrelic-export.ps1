@@ -289,7 +289,7 @@ function Export-DashboardsForAccount {
         $pageGuids  = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor     = if ($results)  { $results.nextCursor } else { $null }
 
-        Log-Debug "    Page $page: $($pageGuids.Count) dashboard GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) dashboard GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -332,7 +332,7 @@ function Export-DashboardsForAccount {
         $batchEntities  = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchEntities.Count) dashboard details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchEntities.Count) dashboard details"
         $allEntities = Merge-Arrays $allEntities $batchEntities
         $start += $EntityFetchBatch
         $batchNum++
@@ -477,7 +477,7 @@ function Export-SyntheticsForAccount {
         $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
         $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor    = if ($results)  { $results.nextCursor } else { $null }
-        Log-Debug "    Page $page: $($pageGuids.Count) monitor GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) monitor GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -508,7 +508,7 @@ function Export-SyntheticsForAccount {
         $batchItems     = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchItems.Count) monitor details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) monitor details"
         $allMonitors = Merge-Arrays $allMonitors $batchItems
         $start += $EntityFetchBatch
         $batchNum++
@@ -552,7 +552,7 @@ function Export-WorkloadsForAccount {
         $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
         $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor    = if ($results)  { $results.nextCursor } else { $null }
-        Log-Debug "    Page $page: $($pageGuids.Count) workload GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) workload GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -582,7 +582,7 @@ function Export-WorkloadsForAccount {
         $batchItems     = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchItems.Count) workload details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) workload details"
         $allWorkloads = Merge-Arrays $allWorkloads $batchItems
         $start += $EntityFetchBatch
         $batchNum++
