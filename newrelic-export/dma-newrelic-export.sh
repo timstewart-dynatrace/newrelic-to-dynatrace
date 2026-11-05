@@ -11,7 +11,7 @@ fi
 #
 #  DMA New Relic Export Script
 #
-#  Version: v1.3.6            Released: 2026-08-10
+#  Version: v1.3.7            Released: 2026-11-05
 #
 #  (This line and the SCRIPT_VERSION constant are checked against each other at
 #   startup — if they ever disagree the script says so on stderr. The banner
@@ -101,7 +101,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.6"
+readonly SCRIPT_VERSION="1.3.7"
 
 # Banner/constant drift guard. The header comment is what a human reads when
 # they open this file, so it must not silently disagree with what actually runs
@@ -706,12 +706,20 @@ GRAPHQL
         nrqlConditionsSearch${search_args} {
           nrqlConditions {
             id name description enabled entityGuid policyId
+            type runbookUrl violationTimeLimitSeconds
             nrql { query }
+            terms { threshold thresholdDuration thresholdOccurrences operator priority }
+            signal {
+              aggregationWindow aggregationMethod aggregationDelay aggregationTimer
+              fillOption fillValue slideBy evaluationDelay
+            }
             expiration {
               closeViolationsOnExpiration
               expirationDuration
               openViolationOnExpiration
             }
+            ... on AlertsNrqlBaselineCondition { baselineDirection }
+            ... on AlertsNrqlOutlierCondition { expectedGroups openViolationOnGroupOverlap }
           }
           nextCursor
         }
