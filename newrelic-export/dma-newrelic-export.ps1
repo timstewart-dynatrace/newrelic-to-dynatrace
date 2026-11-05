@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.2
+    DMA New Relic Export Script v1.0.3
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.2"
+$ScriptVersion    = "1.0.3"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -399,8 +399,13 @@ function Export-AlertsForAccount {
         nrqlConditionsSearch$searchArgs {
           nrqlConditions {
             id name description enabled entityGuid policyId
+            type runbookUrl violationTimeLimitSeconds
             nrql { query }
+            terms { threshold thresholdDuration thresholdOccurrences operator priority }
+            signal { aggregationWindow aggregationMethod aggregationDelay aggregationTimer fillOption fillValue slideBy evaluationDelay }
             expiration { closeViolationsOnExpiration expirationDuration openViolationOnExpiration }
+            ... on AlertsNrqlBaselineCondition { baselineDirection }
+            ... on AlertsNrqlOutlierCondition { expectedGroups openViolationOnGroupOverlap }
           }
           nextCursor
         }

@@ -224,9 +224,10 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
       "aggregationMethod": "EVENT_FLOW",
       "aggregationDelay": null,
       "aggregationTimer": null,
-      "evaluationOffset": null,
       "fillOption": "NONE",
-      "fillValue": null
+      "fillValue": null,
+      "slideBy": null,
+      "evaluationDelay": null
     },
     "terms": [
       {
@@ -246,6 +247,16 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
   }
 ]
 ```
+
+`type` is `STATIC`, `BASELINE` or `OUTLIER`. Type-specific fields:
+
+- **`BASELINE`** adds `baselineDirection` (`UPPER_ONLY`, `LOWER_ONLY`, `UPPER_AND_LOWER`). Its
+  `terms[].threshold` is a number of **standard deviations from the baseline**, not a value of the
+  query result. Do not convert it as a static threshold.
+- **`OUTLIER`** adds `expectedGroups` and `openViolationOnGroupOverlap`.
+
+`terms`, `signal`, `type`, `runbookUrl` and `violationTimeLimitSeconds` are exported from
+v1.3.7 (`.ps1` v1.0.3). Earlier archives lack them, so every threshold reads as missing.
 
 ---
 
