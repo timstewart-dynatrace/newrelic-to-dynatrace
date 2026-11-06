@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.2
+    DMA New Relic Export Script v1.0.3
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.2"
+$ScriptVersion    = "1.0.3"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -289,7 +289,7 @@ function Export-DashboardsForAccount {
         $pageGuids  = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor     = if ($results)  { $results.nextCursor } else { $null }
 
-        Log-Debug "    Page $page: $($pageGuids.Count) dashboard GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) dashboard GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -332,7 +332,7 @@ function Export-DashboardsForAccount {
         $batchEntities  = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchEntities.Count) dashboard details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchEntities.Count) dashboard details"
         $allEntities = Merge-Arrays $allEntities $batchEntities
         $start += $EntityFetchBatch
         $batchNum++
@@ -399,8 +399,13 @@ function Export-AlertsForAccount {
         nrqlConditionsSearch$searchArgs {
           nrqlConditions {
             id name description enabled entityGuid policyId
+            type runbookUrl violationTimeLimitSeconds
             nrql { query }
+            terms { threshold thresholdDuration thresholdOccurrences operator priority }
+            signal { aggregationWindow aggregationMethod aggregationDelay aggregationTimer fillOption fillValue slideBy evaluationDelay }
             expiration { closeViolationsOnExpiration expirationDuration openViolationOnExpiration }
+            ... on AlertsNrqlBaselineCondition { baselineDirection }
+            ... on AlertsNrqlOutlierCondition { expectedGroups openViolationOnGroupOverlap }
           }
           nextCursor
         }
@@ -477,7 +482,7 @@ function Export-SyntheticsForAccount {
         $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
         $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor    = if ($results)  { $results.nextCursor } else { $null }
-        Log-Debug "    Page $page: $($pageGuids.Count) monitor GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) monitor GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -508,7 +513,7 @@ function Export-SyntheticsForAccount {
         $batchItems     = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchItems.Count) monitor details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) monitor details"
         $allMonitors = Merge-Arrays $allMonitors $batchItems
         $start += $EntityFetchBatch
         $batchNum++
@@ -552,7 +557,7 @@ function Export-WorkloadsForAccount {
         $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
         $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
         $cursor    = if ($results)  { $results.nextCursor } else { $null }
-        Log-Debug "    Page $page: $($pageGuids.Count) workload GUIDs"
+        Log-Debug "    Page ${page}: $($pageGuids.Count) workload GUIDs"
         $allGuids = Merge-Arrays $allGuids $pageGuids
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
@@ -582,7 +587,7 @@ function Export-WorkloadsForAccount {
         $batchItems     = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
-        Log-Debug "    Batch $batchNum: fetched $($batchItems.Count) workload details"
+        Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) workload details"
         $allWorkloads = Merge-Arrays $allWorkloads $batchItems
         $start += $EntityFetchBatch
         $batchNum++
