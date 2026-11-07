@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.3
+    DMA New Relic Export Script v1.0.4
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.3"
+$ScriptVersion    = "1.0.4"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -311,8 +311,15 @@ function Export-DashboardsForAccount {
   actor {
     entities(guids: $guidsLiteral) {
       ... on DashboardEntity {
-        guid name accountId createdAt updatedAt permissions
+        guid name description accountId createdAt updatedAt permissions
         owner { email userId }
+        variables {
+          name title type isMultiSelection replacementStrategy
+          defaultValues { value { string } }
+          items { title value }
+          nrqlQuery { accountIds query }
+          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
+        }
         pages {
           guid name description
           widgets {
@@ -592,6 +599,63 @@ function Export-WorkloadsForAccount {
         $start += $EntityFetchBatch
         $batchNum++
         Start-Sleep -Milliseconds $ApiDelayMs
+    }
+
+    # Phase 3: workload definitions. WorkloadEntity carries metadata only; the
+    # entity queries, static entities and status rules live on
+    # account.workload.collections. Merge them into each workload by guid.
+    if ($allWorkloads.Count -gt 0) {
+        $collectionsQuery = @"
+{
+  actor {
+    account(id: $AccountId) {
+      workload {
+        collections {
+          guid description
+          entitySearchQueries { query }
+          entities { guid }
+          scopeAccounts { accountIds }
+          statusConfig {
+            automatic {
+              enabled
+              remainingEntitiesRule { rollup { strategy thresholdType thresholdValue } }
+              rules {
+                entitySearchQueries { query }
+                entities { guid }
+                rollup { strategy thresholdType thresholdValue }
+              }
+            }
+            static { description enabled status summary }
+          }
+        }
+      }
+    }
+  }
+}
+"@
+        $collectionsResponse = Invoke-NerdGraph $collectionsQuery
+        $collections = if ($collectionsResponse -and $collectionsResponse.data.actor.account.workload) {
+            @($collectionsResponse.data.actor.account.workload.collections | Where-Object { $_ -and $_.guid })
+        } else { $null }
+
+        if ($null -eq $collections) {
+            Log-Warn "  [Account $AccountId] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules"
+        } else {
+            $byGuid = @{}
+            foreach ($c in $collections) { $byGuid[$c.guid] = $c }
+            foreach ($w in $allWorkloads) {
+                $col = $byGuid[$w.guid]
+                if (-not $col) { continue }
+                $entitySearchQueries = if ($col.entitySearchQueries) { @($col.entitySearchQueries) } else { @() }
+                $entityGuids         = if ($col.entities) { @($col.entities | ForEach-Object { $_.guid }) } else { @() }
+                $w | Add-Member -NotePropertyName description         -NotePropertyValue $col.description     -Force
+                $w | Add-Member -NotePropertyName entitySearchQueries -NotePropertyValue $entitySearchQueries -Force
+                $w | Add-Member -NotePropertyName entityGuids         -NotePropertyValue $entityGuids         -Force
+                $w | Add-Member -NotePropertyName scopeAccounts       -NotePropertyValue $col.scopeAccounts   -Force
+                $w | Add-Member -NotePropertyName statusConfig        -NotePropertyValue $col.statusConfig    -Force
+            }
+            Log-Debug "    Merged definitions for $($collections.Count) workload collections"
+        }
     }
 
     Save-Json -Data $allWorkloads -Path (Join-Path $outDir "workloads.json")

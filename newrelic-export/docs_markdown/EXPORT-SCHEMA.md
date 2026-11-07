@@ -148,6 +148,7 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
   {
     "guid": "MTIzNDU2N3xWSVp8REFTSEJPQVJEFDE",
     "name": "Application Overview",
+    "description": "Golden signals for the checkout services",
     "accountId": 1234567,
     "createdAt": "2024-03-15T10:22:00Z",
     "updatedAt": "2025-11-02T08:45:00Z",
@@ -156,6 +157,38 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
       "email": "user@example.com",
       "userId": 4567890
     },
+    "variables": [
+      {
+        "name": "services",
+        "title": "Services",
+        "type": "NRQL",
+        "isMultiSelection": true,
+        "replacementStrategy": "STRING",
+        "defaultValues": [ { "value": { "string": "*" } } ],
+        "items": null,
+        "nrqlQuery": {
+          "accountIds": [1234567],
+          "query": "FROM Transaction SELECT uniques(appName) SINCE 1 day ago"
+        },
+        "options": {
+          "excluded": false,
+          "hiddenOnVariablesBar": false,
+          "ignoreTimeRange": false,
+          "showApplyAction": false
+        }
+      },
+      {
+        "name": "severity",
+        "title": "Severity",
+        "type": "ENUM",
+        "isMultiSelection": null,
+        "replacementStrategy": "STRING",
+        "defaultValues": [ { "value": { "string": "ERROR" } } ],
+        "items": [ { "title": "Error", "value": "ERROR" }, { "title": "Warn", "value": "WARN" } ],
+        "nrqlQuery": null,
+        "options": { "excluded": false, "hiddenOnVariablesBar": false, "ignoreTimeRange": false, "showApplyAction": false }
+      }
+    ],
     "pages": [
       {
         "guid": "MTIzNDU2N3xWSVp8REFTSEJPQVJEFDE_page1",
@@ -185,6 +218,12 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
   }
 ]
 ```
+
+Widget queries reference variables as `{{name}}`. `type` is `NRQL`, `ENUM` or `STRING`;
+`replacementStrategy` is `DEFAULT`, `IDENTIFIER`, `NUMBER` or `STRING`.
+
+`description` and `variables` are exported from v1.3.8 (`.ps1` v1.0.4). In earlier archives,
+widget queries keep their `{{name}}` placeholders but the variable definitions are missing.
 
 ---
 
@@ -330,16 +369,43 @@ v1.3.7 (`.ps1` v1.0.3). Earlier archives lack them, so every threshold reads as 
     "createdAt": "2024-06-01T09:00:00Z",
     "updatedAt": "2025-10-15T14:30:00Z",
     "permalink": "https://one.newrelic.com/workloads/...",
-    "entitySearchQuery": "type IN ('APPLICATION', 'SERVICE') AND tags.team = 'ecommerce'",
+    "tags": [
+      { "key": "team", "values": ["ecommerce"] }
+    ],
+    "description": "Checkout and catalog services",
+    "entitySearchQueries": [
+      { "query": "type IN ('APPLICATION', 'SERVICE') AND tags.team = 'ecommerce'" }
+    ],
+    "entityGuids": ["MTIzNDU2N3xBUE18QVBQTElDQVRJT058MQ"],
     "scopeAccounts": {
       "accountIds": [1234567, 8901234]
     },
-    "tags": [
-      { "key": "team", "values": ["ecommerce"] }
-    ]
+    "statusConfig": {
+      "automatic": {
+        "enabled": true,
+        "remainingEntitiesRule": {
+          "rollup": { "strategy": "WORST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
+        },
+        "rules": [
+          {
+            "entitySearchQueries": [ { "query": "type = 'APPLICATION'" } ],
+            "entities": [],
+            "rollup": { "strategy": "BEST_STATUS_WINS", "thresholdType": "FIXED", "thresholdValue": 1 }
+          }
+        ]
+      },
+      "static": []
+    }
   }
 ]
 ```
+
+`guid`, `name`, `accountId`, `createdAt`, `updatedAt`, `permalink` and `tags` come from the
+`WorkloadEntity`. The definition fields (`description`, `entitySearchQueries`, `entityGuids`,
+`scopeAccounts`, `statusConfig`) come from `account.workload.collections` and are merged in by
+`guid`. They are exported from v1.3.8 (`.ps1` v1.0.4). Earlier archives carry only the entity
+metadata, so a workload has no membership rules. `entityGuids` lists statically added entities.
+If the definitions query fails, the exporter logs a warning and writes the metadata alone.
 
 ---
 

@@ -18,6 +18,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.8] - 2026-11-07
+
+### Fixed
+
+- **🔴 Dashboard variables were not exported.** The `DashboardEntity` selection had no `variables` field. Widget queries kept their `{{name}}` placeholders, but the archive had no definitions to resolve them against. The selection now includes `variables` with every `DashboardVariable` field: `name title type isMultiSelection replacementStrategy`, `defaultValues { value { string } }`, `items { title value }`, `nrqlQuery { accountIds query }` and `options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }`. The dashboard-level `description` is now selected too.
+- **🔴 Workload definitions were not exported.** `WorkloadEntity` returns metadata only. Membership and health rules live on `account.workload.collections`, which the exporter never queried, so every workload arrived with no entity search queries, no static entities and no status rules. A third phase now queries the account's collections and merges these fields into each workload by `guid`:
+  - `description`
+  - `entitySearchQueries [{query}]`
+  - `entityGuids` (from `entities[].guid`)
+  - `scopeAccounts`
+  - `statusConfig`: automatic rules and rollups, plus static statuses
+
+  The field names match what `@dma/newrelic-converter` already reads (`NRWorkload.entitySearchQueries`, `entityGuids`, `description`). If the definitions query fails, the exporter logs a warning and still writes the metadata.
+
+  **Verified against NerdGraph** on test account 8018100, with both the `.sh` and the `.ps1` (`.ps1` v1.0.4), and identical output from each:
+  - 90 dashboards exported; the two with variables carry all their definitions (3 on the templated dashboard: an NRQL multi-select, an ENUM and a STRING `IDENTIFIER`)
+  - all 5 workloads carry 1 entity search query and 5 automatic status rules
+  - the converter now passes the workload query and description through; previously both were missing
+
+### Changed
+
+- `EXPORT-SCHEMA.md`: the dashboards section documents `description` and `variables`. The workloads section had shown an `entitySearchQuery` string that the exporter never produced and the converter never read; it now documents `entitySearchQueries`, `entityGuids`, `description`, `scopeAccounts` and `statusConfig`.
+
+### Known issues
+
+- `.ps1` `-All` / `-ServiceLevels` still fail at service levels (the pre-v1.3.3 `account.serviceLevel` shape). This is unchanged from v1.3.7; use `-Dashboards -Alerts -Synthetics -Workloads` on Windows until the port lands.
+
 ## [1.3.7] - 2026-11-05
 
 ### Fixed
