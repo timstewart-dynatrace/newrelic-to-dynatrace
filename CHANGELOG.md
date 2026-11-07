@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`agent-directives/`**: self-contained briefs for applying staging fixes to the official `Dynatrace-Customer-Success` repos (the exporter and the DMA app), with an ordered index. The first two cover v1.3.7 (alert terms) and v1.3.8 (dashboard variables and workload definitions). Docs only; no script change.
+
 - **`nr-supplemental-export.sh` v0.2.0 — `.env` credential support**, ported from the main exporter: loads `NEW_RELIC_USER_API_KEY` / `NEW_RELIC_ACCOUNT_ID` / `NEW_RELIC_REGION` from a `.env` file (current directory first, then repo root) with precedence CLI flags > exported environment > `.env`. Usage text updated (env section now documents the `.env` file and comma-separated account IDs).
 
 ### Fixed
