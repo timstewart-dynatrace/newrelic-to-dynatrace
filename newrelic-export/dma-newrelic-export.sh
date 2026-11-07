@@ -11,7 +11,7 @@ fi
 #
 #  DMA New Relic Export Script
 #
-#  Version: v1.3.7            Released: 2026-11-05
+#  Version: v1.3.8            Released: 2026-11-07
 #
 #  (This line and the SCRIPT_VERSION constant are checked against each other at
 #   startup — if they ever disagree the script says so on stderr. The banner
@@ -101,7 +101,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.7"
+readonly SCRIPT_VERSION="1.3.8"
 
 # Banner/constant drift guard. The header comment is what a human reads when
 # they open this file, so it must not silently disagree with what actually runs
@@ -593,8 +593,15 @@ GRAPHQL
   actor {
     entities(guids: ${guids_literal}) {
       ... on DashboardEntity {
-        guid name accountId createdAt updatedAt permissions
+        guid name description accountId createdAt updatedAt permissions
         owner { email userId }
+        variables {
+          name title type isMultiSelection replacementStrategy
+          defaultValues { value { string } }
+          items { title value }
+          nrqlQuery { accountIds query }
+          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
+        }
         pages {
           guid name description
           widgets {
@@ -1016,6 +1023,60 @@ GRAPHQL
         batch_num=$((batch_num + 1))
         sleep "$API_DELAY"
     done
+
+    # Phase 3 — workload definitions. WorkloadEntity carries only metadata; the
+    # definition (entity queries, static members, status rules) lives on the
+    # account's WorkloadCollection. Merged by guid into the converter's shape:
+    # entitySearchQueries [{query}], entityGuids [guid], plus description,
+    # scopeAccounts and statusConfig.
+    if [[ "$guid_count" -gt 0 ]]; then
+        local collections_query
+        collections_query=$(cat <<GRAPHQL
+{
+  actor {
+    account(id: ${account_id}) {
+      workload {
+        collections {
+          guid description
+          entitySearchQueries { query }
+          entities { guid }
+          scopeAccounts { accountIds }
+          statusConfig {
+            automatic {
+              enabled
+              remainingEntitiesRule { rollup { strategy thresholdType thresholdValue } }
+              rules {
+                entitySearchQueries { query }
+                entities { guid }
+                rollup { strategy thresholdType thresholdValue }
+              }
+            }
+            static { description enabled status summary }
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+)
+        local collections_response collections
+        if collections_response=$(nerdgraph_query "$collections_query") \
+            && collections=$(echo "$collections_response" | jq -e '.data.actor.account.workload.collections | arrays' 2>/dev/null); then
+            all_workloads=$(jq -n --argjson w "$all_workloads" --argjson c "$collections" '
+                ($c | map({key: .guid, value: .}) | from_entries) as $byGuid
+                | $w | map(. as $e | ($byGuid[$e.guid] // null) as $col
+                    | if $col == null then $e else $e + {
+                        description: $col.description,
+                        entitySearchQueries: ($col.entitySearchQueries // []),
+                        entityGuids: [($col.entities // [])[].guid],
+                        scopeAccounts: $col.scopeAccounts,
+                        statusConfig: $col.statusConfig
+                      } end)' 2>/dev/null || echo "$all_workloads")
+        else
+            log_warn "  [Account $account_id] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules"
+        fi
+    fi
 
     echo "$all_workloads" | jq '.' > "$out_dir/workloads.json" 2>/dev/null || echo "[]" > "$out_dir/workloads.json"
     local total
