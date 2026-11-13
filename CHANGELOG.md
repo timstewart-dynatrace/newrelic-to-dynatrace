@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **🔴 `dma-newrelic-export.ps1`: `-All` / `-ServiceLevels` aborted and wrote no archive (`.ps1` v1.0.4).** `Export-ServiceLevelsForAccount` still queried `actor.account(id:).serviceLevel`, which NerdGraph rejects (`Cannot query field serviceLevel on type Account`). With no data, `Merge-Arrays` returned `$null` (a PowerShell function unrolls an empty array), and under `Set-StrictMode -Version Latest` the `.Count` read on it threw `The property 'Count' cannot be found`, ending the whole run.
+
+  Ported the bash entity-based query (v1.3.3): phase 1 finds `SERVICE_LEVEL` entity GUIDs with `entitySearch` (cursor on `results`, per the v1.3.5 fix), phase 2 fetches `... on ExternalEntity { serviceLevel { indicators { ... } } }` in batches of `$EntityFetchBatch`. `service_levels/indicators.json` now has the same shape as the bash export (the old `.ps1` query also selected `events.account`, which bash does not).
+
+  A service-level failure now degrades instead of aborting: the function logs an error, writes whatever it collected (`[]` at minimum) and marks the count `INCOMPLETE`, and the remaining phases and the archive still run. New `Get-JsonPath` helper reads nested response fields without tripping StrictMode on missing or null properties.
+
+  Verified with a parser check (0 errors) and mocked NerdGraph runs under StrictMode: paged search with 3 SLIs, 0 SLIs, exactly 1 SLI, API failure, and an exception mid-run. **Not yet verified live** against a New Relic account.
+
 - **`nr-supplemental-export.sh`: `NEW_RELIC_REGION` was dead code** — `REGION` is initialized to `US`, so the `[[ -z "$REGION" ]]` env fallback could never fire; the env var the usage text advertised was silently ignored. Now applied whenever `--region` is not passed explicitly (`REGION_EXPLICIT` flag, same pattern as the main script).
 - **`nr-supplemental-export.sh`: lowercase region rejected** — `--region eu` failed the case-sensitive `US|EU` validation. Region input is now uppercased via the same POSIX `to_upper` helper as the main script (bash 3.2-safe). Verified on bash 3.2.57.
 

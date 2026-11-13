@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.3
+    DMA New Relic Export Script v1.0.4
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.3"
+$ScriptVersion    = "1.0.4"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -225,6 +225,20 @@ function Count-JsonFile {
         if ($data -is [array]) { return $data.Count }
         return 0
     } catch { return 0 }
+}
+
+function Get-JsonPath {
+    # StrictMode-safe nested read: returns $null if any segment is missing or
+    # null instead of throwing (StrictMode throws on both). Arrays unroll on
+    # output like any PowerShell function, so wrap list reads in @(...).
+    param([object]$Object, [string]$Path)
+    foreach ($segment in $Path.Split('.')) {
+        if ($null -eq $Object) { return $null }
+        $prop = $Object.psobject.Properties[$segment]
+        if (-not $prop) { return $null }
+        $Object = $prop.Value
+    }
+    return $Object
 }
 
 function Merge-Arrays {
@@ -609,22 +623,77 @@ function Export-ServiceLevelsForAccount {
 
     Log-Info "  [Account $AccountId] Exporting service level indicators..."
 
-    $cursor        = $null
-    $allIndicators = @()
+    # Service levels are entities (type = 'SERVICE_LEVEL', domain 'EXT') — the
+    # entity itself IS the SLI. There is no Account.serviceLevel field; the real
+    # path is entity.serviceLevel (ServiceLevelDefinition) -> indicators. Same
+    # two-phase entitySearch -> entities(guids:) pattern as the bash script
+    # (export_service_levels_for_account, v1.3.3+), so indicators.json has the
+    # identical shape.
+    #
+    # Lists are used instead of Merge-Arrays: a function returning an empty or
+    # one-element array unrolls it to $null / a scalar, and under StrictMode
+    # `$null.Count` throws — which is how the old version aborted the whole run.
+    $allGuids      = [System.Collections.Generic.List[string]]::new()
+    $allIndicators = [System.Collections.Generic.List[object]]::new()
+    $queryFailed   = $false
 
-    do {
-        $cursorArg = if ($cursor) { "(cursor: `"$cursor`")" } else { "" }
-        $query = @"
+    try {
+        # Phase 1 — discover SLI entity GUIDs. The cursor belongs on `results`,
+        # not on `entitySearch` (bash CHANGELOG v1.3.5).
+        $cursor = $null
+        $page   = 1
+        do {
+            $cursorArg = if ($cursor) { "(cursor: `"$cursor`")" } else { "" }
+            $query = @"
 {
   actor {
-    account(id: $AccountId) {
-      serviceLevel {
-        indicators$cursorArg {
-          nextCursor
-          objects {
+    entitySearch(query: "type = 'SERVICE_LEVEL' AND accountId = $AccountId") {
+      results$cursorArg {
+        entities {
+          ... on ExternalEntityOutline { guid }
+        }
+        nextCursor
+      }
+    }
+  }
+}
+"@
+            $response = Invoke-NerdGraph $query
+            if (-not $response) {
+                Log-Error "  [Account $AccountId] Service level entitySearch failed after retries (page ${page})"
+                $queryFailed = $true
+                break
+            }
+            $results   = Get-JsonPath $response 'data.actor.entitySearch.results'
+            $pageGuids = @(@(Get-JsonPath $results 'entities') |
+                ForEach-Object { Get-JsonPath $_ 'guid' } | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            foreach ($g in $pageGuids) { $allGuids.Add($g) }
+            $cursor = Get-JsonPath $results 'nextCursor'
+            Log-Debug "    Page ${page}: $($pageGuids.Count) SLI GUIDs"
+            $page++
+            Start-Sleep -Milliseconds $ApiDelayMs
+        } while ($cursor)
+
+        Log-Debug "    Phase 1 complete: $($allGuids.Count) SLI GUIDs"
+
+        # Phase 2 — batch-fetch full indicator details
+        $start    = 0
+        $batchNum = 1
+        while (-not $queryFailed -and $start -lt $allGuids.Count) {
+            $end          = [Math]::Min($start + $EntityFetchBatch, $allGuids.Count)
+            $batch        = $allGuids.GetRange($start, $end - $start)
+            $guidsLiteral = '["' + ($batch -join '","') + '"]'
+
+            $detailQuery = @"
+{
+  actor {
+    entities(guids: $guidsLiteral) {
+      ... on ExternalEntity {
+        guid
+        serviceLevel {
+          indicators {
             id name description guid entityGuid createdAt updatedAt
             events {
-              account { id name }
               validEvents { from where }
               goodEvents  { from where }
               badEvents   { from where }
@@ -640,16 +709,34 @@ function Export-ServiceLevelsForAccount {
   }
 }
 "@
-        $response  = Invoke-NerdGraph $query
-        $sli       = if ($response) { $response.data.actor.account.serviceLevel.indicators } else { $null }
-        $items     = if ($sli)      { @($sli.objects) } else { @() }
-        $cursor    = if ($sli)      { $sli.nextCursor } else { $null }
-        Log-Debug "    Fetched $($items.Count) SLIs"
-        $allIndicators = Merge-Arrays $allIndicators $items
-        Start-Sleep -Milliseconds $ApiDelayMs
-    } while ($cursor)
+            $detailResponse = Invoke-NerdGraph $detailQuery
+            if (-not $detailResponse) {
+                Log-Error "  [Account $AccountId] Service level indicator detail fetch failed after retries (batch ${batchNum})"
+                $queryFailed = $true
+                break
+            }
+            $batchCount = 0
+            foreach ($entity in @(Get-JsonPath $detailResponse 'data.actor.entities')) {
+                foreach ($indicator in @(Get-JsonPath $entity 'serviceLevel.indicators')) {
+                    if ($indicator) { $allIndicators.Add($indicator); $batchCount++ }
+                }
+            }
+            Log-Debug "    Batch ${batchNum}: fetched $batchCount SLI details"
+            $start = $end
+            $batchNum++
+            Start-Sleep -Milliseconds $ApiDelayMs
+        }
+    } catch {
+        # Degrade like the other phases: never let service levels abort the run.
+        Log-Error "  [Account $AccountId] Service level export error: $_"
+        $queryFailed = $true
+    }
 
-    Save-Json -Data $allIndicators -Path (Join-Path $outDir "indicators.json")
+    Save-Json -Data $allIndicators.ToArray() -Path (Join-Path $outDir "indicators.json") -AsArray
+    if ($queryFailed) {
+        Log-Error "  [Account $AccountId] Exported $($allIndicators.Count) service level indicators (INCOMPLETE — query failed)"
+        return
+    }
     Log-Ok "  [Account $AccountId] Exported $($allIndicators.Count) service level indicators"
 }
 
