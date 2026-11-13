@@ -1,6 +1,6 @@
 # DMA New Relic Export Script
 
-**Version**: 1.3.7
+**Version**: 1.3.8
 **Last Updated**: November 2026
 
 > **Developed for Dynatrace One by Enterprise Solutions & Architecture**
@@ -195,12 +195,12 @@ dma_export_newrelic_YYYYMMDDTHHMMSSZ.tar.gz
 
 | Category | Contents |
 |---|---|
-| **Dashboards** | JSON widget definitions, NRQL queries, layout, page structure, permissions |
+| **Dashboards** | JSON widget definitions, NRQL queries, layout, page structure, permissions, description, template variables |
 | **Alert Policies** | Policy names, incident preferences |
 | **NRQL Conditions** | Conditions with NRQL queries, thresholds, signal configuration |
 | **Notification Channels** | Destinations (webhooks, PagerDuty, etc.) and AI notification channels |
 | **Synthetic Monitors** | Browser/API monitor definitions, locations, schedules |
-| **Workloads** | Entity scope, account relationships, tags |
+| **Workloads** | Entity search queries, static members, scope accounts, status rules, tags |
 | **Service Levels** | SLI/SLO indicators, events, objectives |
 | **Users & Groups** | RBAC configuration (optional, contains PII — requires `--rbac`) |
 | **Usage Analytics** | Dashboard views, alert fire rates, user activity, ingest volume (optional, requires `--usage`) |

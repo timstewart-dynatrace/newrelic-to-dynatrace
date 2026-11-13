@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`nr-supplemental-export.sh`: `NEW_RELIC_REGION` was dead code** — `REGION` is initialized to `US`, so the `[[ -z "$REGION" ]]` env fallback could never fire; the env var the usage text advertised was silently ignored. Now applied whenever `--region` is not passed explicitly (`REGION_EXPLICIT` flag, same pattern as the main script).
+- **`nr-supplemental-export.sh`: lowercase region rejected** — `--region eu` failed the case-sensitive `US|EU` validation. Region input is now uppercased via the same POSIX `to_upper` helper as the main script (bash 3.2-safe). Verified on bash 3.2.57.
+
+- **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
+
+## [1.3.8] - 2026-11-13
+
+### Added
+
+- **Dashboard variables and descriptions are exported.** The `DashboardEntity` selection had no `variables` and no dashboard-level `description` (only `pages[].description`). Widget NRQL kept its `{{name}}` placeholders, but the archive carried no definition of what `name` was, so a templated dashboard could not be converted faithfully. Both scripts now select `description` and `variables { name title type isMultiSelection replacementStrategy defaultValues { value { string } } items { title value } nrqlQuery { accountIds query } options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction } }` (bash v1.3.8, `.ps1` v1.0.5).
+
+- **Workload definitions are exported.** Workloads were fetched as `WorkloadEntity`, which is metadata only (guid, name, timestamps, permalink, tags), so every exported workload had no entity search queries, no static members and no status rules. After the workload batches, each script now runs one `actor.account(id).workload.collections` query per account and merges `description`, `entitySearchQueries` (default `[]`), `entityGuids` (from `entities[].guid`, default `[]`), `scopeAccounts` and `statusConfig` into each workload by `guid`. The query is skipped for accounts with no workloads.
+
+  This never fails the export. If the query fails, the script logs `Workload definitions query failed — workloads exported WITHOUT entity queries or status rules` and writes the metadata. A workload with no matching definition is logged as a warning (`… had no definition in workload.collections — exported as metadata only`) and keeps the `[]` / `null` defaults; it is not otherwise flagged in the archive.
+
+  Schema traps, noted in the code: `WorkloadEntity.collection` is an `EntityCollection` (a different type without these fields), and `WorkloadRollup` has no `groupBy`, so selecting it fails the whole query. `groupBy` is not selected on the remaining-entities rollup either.
+
+  The new fields are additive and match what `@dma/newrelic-converter`'s `NRWorkload` already reads (`entitySearchQueries: [{query}]`, `entityGuids`, `description`).
+
+### Fixed
+
 - **🔴 `dma-newrelic-export.ps1`: `-All` / `-ServiceLevels` aborted and wrote no archive (`.ps1` v1.0.4).** `Export-ServiceLevelsForAccount` still queried `actor.account(id:).serviceLevel`, which NerdGraph rejects (`Cannot query field serviceLevel on type Account`). With no data, `Merge-Arrays` returned `$null` (a PowerShell function unrolls an empty array), and under `Set-StrictMode -Version Latest` the `.Count` read on it threw `The property 'Count' cannot be found`, ending the whole run.
 
   Ported the bash entity-based query (v1.3.3): phase 1 finds `SERVICE_LEVEL` entity GUIDs with `entitySearch` (cursor on `results`, per the v1.3.5 fix), phase 2 fetches `... on ExternalEntity { serviceLevel { indicators { ... } } }` in batches of `$EntityFetchBatch`. `service_levels/indicators.json` now has the same shape as the bash export (the old `.ps1` query also selected `events.account`, which bash does not).
@@ -21,10 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Verified with a parser check (0 errors) and mocked NerdGraph runs under StrictMode: paged search with 3 SLIs, 0 SLIs, exactly 1 SLI, API failure, and an exception mid-run. **Not yet verified live** against a New Relic account.
 
-- **`nr-supplemental-export.sh`: `NEW_RELIC_REGION` was dead code** — `REGION` is initialized to `US`, so the `[[ -z "$REGION" ]]` env fallback could never fire; the env var the usage text advertised was silently ignored. Now applied whenever `--region` is not passed explicitly (`REGION_EXPLICIT` flag, same pattern as the main script).
-- **`nr-supplemental-export.sh`: lowercase region rejected** — `--region eu` failed the case-sensitive `US|EU` validation. Region input is now uppercased via the same POSIX `to_upper` helper as the main script (bash 3.2-safe). Verified on bash 3.2.57.
+- **`.ps1` `-Workloads` threw on an account with 0 or 1 workloads.** `$pageGuids = if (...) { @(...) } else { @() }` unrolls the array, so 0 GUIDs gave `$null`, 1 gave a bare string, and StrictMode threw `The property 'Count' cannot be found`. With 0 workloads the error also left a `$null` GUID behind, which was sent as `entities(guids: [""])`. The search and detail reads now use `Get-JsonPath` wrapped in `@()`, both accumulators are wrapped in `@()` against the `Merge-Arrays` unroll, and `workloads.json` is always written as an array.
 
-- **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
+- **`Get-JsonPath` (added in `.ps1` v1.0.4) now yields nothing for a missing or null value instead of `$null`.** `@(Get-JsonPath …)` on a missing list was `@($null)`, with `Count` 1. Assignment still gives `$null`.
+
+### Changed
+
+- **`EXPORT-SCHEMA.md` workload section corrected.** It documented an `entitySearchQuery` string that the exporter never produced and the converter never read. It now documents `entitySearchQueries`, `entityGuids`, `description`, `scopeAccounts` and `statusConfig`. The dashboard section documents `description` and `variables`.
+
+### Verification
+
+- `bash -n` and the PowerShell parser report no errors.
+- Both workload functions were run with mocked NerdGraph responses: definitions merged by `guid` (description, 1 query, 2 static GUIDs, 1 rule), an unmatched workload keeps `[]`/`null` and logs the warning, and a failed or empty definitions query writes metadata only with the warning. The `.ps1` was also run with exactly 1 and 0 workloads, under StrictMode. The `.ps1` service-level tests from v1.0.4 still pass.
+
+### Not verified
+
+- Neither script has been run live against a New Relic account with this change. The `workload.collections` selection is written from the NerdGraph schema as documented, not checked by introspection. Before tagging, run both scripts against an account with workloads and a templated dashboard (see the test plan in issue #1).
 
 ## [1.3.7] - 2026-11-05
 
