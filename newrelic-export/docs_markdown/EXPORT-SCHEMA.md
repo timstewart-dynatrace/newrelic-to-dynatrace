@@ -148,6 +148,7 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
   {
     "guid": "MTIzNDU2N3xWSVp8REFTSEJPQVJEFDE",
     "name": "Application Overview",
+    "description": "Golden signals for the checkout services",
     "accountId": 1234567,
     "createdAt": "2024-03-15T10:22:00Z",
     "updatedAt": "2025-11-02T08:45:00Z",
@@ -156,6 +157,27 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
       "email": "user@example.com",
       "userId": 4567890
     },
+    "variables": [
+      {
+        "name": "appName",
+        "title": "Application",
+        "type": "NRQL",
+        "isMultiSelection": true,
+        "replacementStrategy": "STRING",
+        "defaultValues": [{ "value": { "string": "checkout-api" } }],
+        "items": null,
+        "nrqlQuery": {
+          "accountIds": [1234567],
+          "query": "SELECT uniques(appName) FROM Transaction"
+        },
+        "options": {
+          "excluded": false,
+          "hiddenOnVariablesBar": false,
+          "ignoreTimeRange": false,
+          "showApplyAction": false
+        }
+      }
+    ],
     "pages": [
       {
         "guid": "MTIzNDU2N3xWSVp8REFTSEJPQVJEFDE_page1",
@@ -185,6 +207,18 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
   }
 ]
 ```
+
+`description` (dashboard level) and `variables` are exported since v1.3.8 (`.ps1`
+v1.0.5); earlier archives lack both. Widget NRQL keeps its `{{name}}`
+placeholders, and `variables[].name` is what they refer to.
+
+| Field | Values / notes |
+|-------|----------------|
+| `type` | `NRQL` (options come from `nrqlQuery`), `ENUM` (options are `items[]`, each `{title, value}`), `STRING` (free text) |
+| `replacementStrategy` | `DEFAULT`, `IDENTIFIER`, `NUMBER`, `STRING` — how the selected value is substituted into NRQL |
+| `isMultiSelection` | `true` when more than one value can be selected |
+| `defaultValues[].value.string` | Default selection(s); empty when there is none |
+| `options` | `excluded`, `hiddenOnVariablesBar`, `ignoreTimeRange`, `showApplyAction` |
 
 ---
 
@@ -330,16 +364,51 @@ v1.3.7 (`.ps1` v1.0.3). Earlier archives lack them, so every threshold reads as 
     "createdAt": "2024-06-01T09:00:00Z",
     "updatedAt": "2025-10-15T14:30:00Z",
     "permalink": "https://one.newrelic.com/workloads/...",
-    "entitySearchQuery": "type IN ('APPLICATION', 'SERVICE') AND tags.team = 'ecommerce'",
+    "tags": [
+      { "key": "team", "values": ["ecommerce"] }
+    ],
+    "description": "Customer-facing checkout path",
+    "entitySearchQueries": [
+      { "id": "1001", "query": "type IN ('APPLICATION', 'SERVICE') AND tags.team = 'ecommerce'" }
+    ],
+    "entityGuids": ["MTIzNDU2N3xBUE18QVBQTElDQVRJT058MTIz"],
     "scopeAccounts": {
       "accountIds": [1234567, 8901234]
     },
-    "tags": [
-      { "key": "team", "values": ["ecommerce"] }
-    ]
+    "statusConfig": {
+      "automatic": {
+        "enabled": true,
+        "rules": [
+          {
+            "id": "2001",
+            "entities": [],
+            "entitySearchQueries": [{ "id": "3001", "query": "type = 'APPLICATION'" }],
+            "rollup": { "strategy": "WORST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
+          }
+        ],
+        "remainingEntitiesRule": {
+          "remainingEntitiesRuleRollup": { "strategy": "BEST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
+        }
+      },
+      "static": []
+    }
   }
 ]
 ```
+
+The first six fields come from the `WorkloadEntity` (metadata only). The rest are
+merged in by `guid` from `actor.account(id).workload.collections`, since v1.3.8
+(`.ps1` v1.0.5):
+
+| Field | Notes |
+|-------|-------|
+| `description` | `null` when the workload has none |
+| `entitySearchQueries` | Membership queries, `[{id, query}]`; `[]` when the workload is defined only by static entities |
+| `entityGuids` | Statically added members (from `entities[].guid`); `[]` when none |
+| `scopeAccounts.accountIds` | Accounts the workload's queries search |
+| `statusConfig` | Health rules: `automatic` (rules plus a rule for the remaining entities) and/or `static` (a fixed status) |
+
+If the definitions query fails, the export logs `Workload definitions query failed — workloads exported WITHOUT entity queries or status rules` and still writes the metadata. A workload with no matching definition keeps `entitySearchQueries: []`, `entityGuids: []` and `null` for the rest. Archives before v1.3.8 have metadata only; the `entitySearchQuery` string documented here earlier was never produced.
 
 ---
 

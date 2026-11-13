@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.4
+    DMA New Relic Export Script v1.0.5
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.4"
+$ScriptVersion    = "1.0.5"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -228,16 +228,19 @@ function Count-JsonFile {
 }
 
 function Get-JsonPath {
-    # StrictMode-safe nested read: returns $null if any segment is missing or
-    # null instead of throwing (StrictMode throws on both). Arrays unroll on
-    # output like any PowerShell function, so wrap list reads in @(...).
+    # StrictMode-safe nested read: yields nothing if any segment is missing or
+    # null instead of throwing (StrictMode throws on both). Emitting nothing,
+    # not $null, matters: `$x = Get-JsonPath ...` still gives $null, but
+    # `@(Get-JsonPath ...)` is then an empty array instead of @($null) with
+    # Count 1. Arrays unroll on output, so wrap list reads in @(...).
     param([object]$Object, [string]$Path)
     foreach ($segment in $Path.Split('.')) {
-        if ($null -eq $Object) { return $null }
+        if ($null -eq $Object) { return }
         $prop = $Object.psobject.Properties[$segment]
-        if (-not $prop) { return $null }
+        if (-not $prop) { return }
         $Object = $prop.Value
     }
+    if ($null -eq $Object) { return }
     return $Object
 }
 
@@ -325,8 +328,15 @@ function Export-DashboardsForAccount {
   actor {
     entities(guids: $guidsLiteral) {
       ... on DashboardEntity {
-        guid name accountId createdAt updatedAt permissions
+        guid name description accountId createdAt updatedAt permissions
         owner { email userId }
+        variables {
+          name title type isMultiSelection replacementStrategy
+          defaultValues { value { string } }
+          items { title value }
+          nrqlQuery { accountIds query }
+          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
+        }
         pages {
           guid name description
           widgets {
@@ -568,11 +578,17 @@ function Export-WorkloadsForAccount {
 }
 "@
         $response  = Invoke-NerdGraph $query
-        $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
-        $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
-        $cursor    = if ($results)  { $results.nextCursor } else { $null }
+        # Get-JsonPath + @() instead of `$x = if (...) { @(...) }`: an if-statement
+        # assignment unrolls the array, so 0 or 1 GUIDs left a $null or a bare
+        # string, and StrictMode threw on .Count below.
+        $results   = Get-JsonPath $response 'data.actor.entitySearch.results'
+        $pageGuids = @(@(Get-JsonPath $results 'entities') |
+            ForEach-Object { Get-JsonPath $_ 'guid' } | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        $cursor    = Get-JsonPath $results 'nextCursor'
         Log-Debug "    Page ${page}: $($pageGuids.Count) workload GUIDs"
-        $allGuids = Merge-Arrays $allGuids $pageGuids
+        # @() keeps it an array: Merge-Arrays unrolls an empty result to $null,
+        # and StrictMode throws on $null.Count (see Export-ServiceLevelsForAccount).
+        $allGuids = @(Merge-Arrays $allGuids $pageGuids)
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
     } while ($cursor)
@@ -598,17 +614,84 @@ function Export-WorkloadsForAccount {
 }
 "@
         $detailResponse = Invoke-NerdGraph $detailQuery
-        $batchItems     = if ($detailResponse) {
-            @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
-        } else { @() }
+        $batchItems     = @(@(Get-JsonPath $detailResponse 'data.actor.entities') | Where-Object { Get-JsonPath $_ 'guid' })
         Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) workload details"
-        $allWorkloads = Merge-Arrays $allWorkloads $batchItems
+        $allWorkloads = @(Merge-Arrays $allWorkloads $batchItems)
         $start += $EntityFetchBatch
         $batchNum++
         Start-Sleep -Milliseconds $ApiDelayMs
     }
 
-    Save-Json -Data $allWorkloads -Path (Join-Path $outDir "workloads.json")
+    # Phase 3 — workload definitions. WorkloadEntity is metadata only; the
+    # membership (entity search queries, static entities) and health rules live
+    # on actor.account(id).workload.collections. One query per account, merged
+    # into each workload by guid — same shape as the bash export (v1.3.8).
+    # Schema traps: WorkloadEntity.collection is an EntityCollection (a different
+    # type without these fields), and WorkloadRollup has no groupBy — selecting
+    # it fails the whole query.
+    if ($allWorkloads.Count -gt 0) {
+        $defsQuery = @"
+{
+  actor {
+    account(id: $AccountId) {
+      workload {
+        collections {
+          guid description
+          entities { guid }
+          entitySearchQueries { id query }
+          scopeAccounts { accountIds }
+          statusConfig {
+            automatic {
+              enabled
+              rules {
+                id
+                entities { guid }
+                entitySearchQueries { id query }
+                rollup { strategy thresholdType thresholdValue }
+              }
+              remainingEntitiesRule {
+                remainingEntitiesRuleRollup { strategy thresholdType thresholdValue }
+              }
+            }
+            static { id enabled status summary description }
+          }
+        }
+      }
+    }
+  }
+}
+"@
+        try {
+            $defsResponse = Invoke-NerdGraph $defsQuery
+            $collections  = if ($defsResponse) { Get-JsonPath $defsResponse 'data.actor.account.workload.collections' } else { $null }
+            if ($null -eq $collections) { throw "no workload.collections in response" }
+
+            $byGuid = @{}
+            foreach ($c in @($collections)) {
+                $g = Get-JsonPath $c 'guid'
+                if ($g) { $byGuid[[string]$g] = $c }
+            }
+            $unmatched = 0
+            foreach ($wl in $allWorkloads) {
+                $c = $byGuid[[string]$wl.guid]
+                if (-not $c) { $unmatched++ }
+                $guids = @(@(Get-JsonPath $c 'entities') | ForEach-Object { Get-JsonPath $_ 'guid' } | Where-Object { $_ })
+                $wl | Add-Member -Force -NotePropertyName description         -NotePropertyValue (Get-JsonPath $c 'description')
+                $wl | Add-Member -Force -NotePropertyName entitySearchQueries -NotePropertyValue @(Get-JsonPath $c 'entitySearchQueries')
+                $wl | Add-Member -Force -NotePropertyName entityGuids         -NotePropertyValue $guids
+                $wl | Add-Member -Force -NotePropertyName scopeAccounts       -NotePropertyValue (Get-JsonPath $c 'scopeAccounts')
+                $wl | Add-Member -Force -NotePropertyName statusConfig        -NotePropertyValue (Get-JsonPath $c 'statusConfig')
+            }
+            Log-Debug "    Phase 3 complete: $($byGuid.Count) workload definitions, $unmatched workload(s) without one"
+            if ($unmatched -gt 0) {
+                Log-Warn "  [Account $AccountId] $unmatched workload(s) had no definition in workload.collections — exported as metadata only"
+            }
+        } catch {
+            Log-Warn "  [Account $AccountId] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules ($_)"
+        }
+    }
+
+    Save-Json -Data $allWorkloads -Path (Join-Path $outDir "workloads.json") -AsArray
     Log-Ok "  [Account $AccountId] Exported $($allWorkloads.Count) workloads"
 }
 
