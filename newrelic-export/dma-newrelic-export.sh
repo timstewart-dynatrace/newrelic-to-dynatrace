@@ -11,7 +11,7 @@ fi
 #
 #  DMA New Relic Export Script
 #
-#  Version: v1.3.7            Released: 2026-11-05
+#  Version: v1.3.8            Released: 2026-11-13
 #
 #  (This line and the SCRIPT_VERSION constant are checked against each other at
 #   startup — if they ever disagree the script says so on stderr. The banner
@@ -101,7 +101,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.7"
+readonly SCRIPT_VERSION="1.3.8"
 
 # Banner/constant drift guard. The header comment is what a human reads when
 # they open this file, so it must not silently disagree with what actually runs
@@ -593,8 +593,15 @@ GRAPHQL
   actor {
     entities(guids: ${guids_literal}) {
       ... on DashboardEntity {
-        guid name accountId createdAt updatedAt permissions
+        guid name description accountId createdAt updatedAt permissions
         owner { email userId }
+        variables {
+          name title type isMultiSelection replacementStrategy
+          defaultValues { value { string } }
+          items { title value }
+          nrqlQuery { accountIds query }
+          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
+        }
         pages {
           guid name description
           widgets {
@@ -1016,6 +1023,79 @@ GRAPHQL
         batch_num=$((batch_num + 1))
         sleep "$API_DELAY"
     done
+
+    # Phase 3 — workload definitions. WorkloadEntity is metadata only; the
+    # membership (entity search queries, static entities) and health rules
+    # live on actor.account(id).workload.collections. One query per account,
+    # merged into each workload by guid. Schema traps: WorkloadEntity.collection
+    # is an EntityCollection (a different type without these fields), and
+    # WorkloadRollup has no groupBy — selecting it fails the whole query.
+    if [[ $guid_count -gt 0 ]]; then
+        local defs_query
+        defs_query=$(cat <<GRAPHQL
+{
+  actor {
+    account(id: ${account_id}) {
+      workload {
+        collections {
+          guid description
+          entities { guid }
+          entitySearchQueries { id query }
+          scopeAccounts { accountIds }
+          statusConfig {
+            automatic {
+              enabled
+              rules {
+                id
+                entities { guid }
+                entitySearchQueries { id query }
+                rollup { strategy thresholdType thresholdValue }
+              }
+              remainingEntitiesRule {
+                remainingEntitiesRuleRollup { strategy thresholdType thresholdValue }
+              }
+            }
+            static { id enabled status summary description }
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+)
+        local defs_response defs
+        if defs_response=$(nerdgraph_query "$defs_query") \
+            && defs=$(echo "$defs_response" | jq -e '.data.actor.account.workload.collections | arrays' 2>/dev/null); then
+            local merged
+            # Both arrays go via stdin, not --argjson (ARG_MAX — see json_merge_arrays).
+            if merged=$(printf '%s\n%s\n' "$all_workloads" "$defs" | jq -s '
+                .[0] as $w | .[1] as $d
+                | (reduce $d[] as $c ({}; .[$c.guid] = $c)) as $by_guid
+                | $w | map(
+                    . as $wl
+                    | ($by_guid[$wl.guid] // null) as $c
+                    | $wl + {
+                        description:         ($c.description // null),
+                        entitySearchQueries: ($c.entitySearchQueries // []),
+                        entityGuids:         ([($c.entities // [])[] | .guid]),
+                        scopeAccounts:       ($c.scopeAccounts // null),
+                        statusConfig:        ($c.statusConfig // null)
+                      }
+                  )' 2>/dev/null); then
+                all_workloads="$merged"
+                local unmatched
+                unmatched=$(printf '%s\n%s\n' "$all_workloads" "$defs" \
+                    | jq -s '[.[0][].guid] - [.[1][].guid] | length' 2>/dev/null || echo 0)
+                log_debug "    Phase 3 complete: $(echo "$defs" | jq 'length') workload definitions, $unmatched workload(s) without one"
+                [[ "$unmatched" -gt 0 ]] && log_warn "  [Account $account_id] $unmatched workload(s) had no definition in workload.collections — exported as metadata only"
+            else
+                log_warn "  [Account $account_id] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules"
+            fi
+        else
+            log_warn "  [Account $account_id] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules"
+        fi
+    fi
 
     echo "$all_workloads" | jq '.' > "$out_dir/workloads.json" 2>/dev/null || echo "[]" > "$out_dir/workloads.json"
     local total
