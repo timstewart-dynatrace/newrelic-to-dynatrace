@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.9] - 2026-11-13
+
+### Fixed
+
+- **Workload definitions were never exported (v1.3.8).** The v1.3.8 definitions query selected `remainingEntitiesRule { remainingEntitiesRuleRollup }`, but NerdGraph's field is `rollup`, so it always failed with `Cannot query field "remainingEntitiesRuleRollup" on type "WorkloadRemainingEntitiesRule"`, and every workload was exported as metadata only. Both scripts now select `remainingEntitiesRule { rollup { groupBy strategy thresholdType thresholdValue } }` (bash v1.3.9, `.ps1` v1.0.6). **Archive shape change:** `statusConfig.automatic.remainingEntitiesRule.rollup` (v1.3.8 never produced the old key).
+- **Workload definitions are fetched by guid.** Instead of one `workload.collections` list query per account, each script asks for the workloads it found with `workload.collection(guid:)`, 25 per query under GraphQL aliases, and retries a failed batch one workload at a time. One bad workload no longer drops every definition, and only the exported workloads are fetched. Both fields are deprecated in NerdGraph in favour of `WorkloadEntity.healthCriteria` / `collection.definition`; moving to those changes the archive shape and is left for a later release.
+
+### Changed
+
+- **A failed dashboard detail query no longer ends silently with 0 dashboards.** If a batch fails while selecting `variables`, the scripts retry it without them and log a warning; if the retry also fails, they log `Dashboard detail batch N failed after retries — export is INCOMPLETE`. Previously a failed batch was dropped and the run still reported `Exported N dashboards` as a success.
+
+Checked by live NerdGraph introspection and a live run (2026-11-13): 90 dashboards exported with `variables` (NRQL, ENUM and STRING types present), and all 5 workloads exported with definitions. The unfixed v1.3.8 exported the same 90 dashboards but no workload definitions.
+
 ## [1.3.8] - 2026-11-13
 
 ### Added

@@ -220,6 +220,8 @@ placeholders, and `variables[].name` is what they refer to.
 | `defaultValues[].value.string` | Default selection(s); empty when there is none |
 | `options` | `excluded`, `hiddenOnVariablesBar`, `ignoreTimeRange`, `showApplyAction` |
 
+Since v1.3.9 (`.ps1` v1.0.6), if the dashboard query fails with `variables`, the export retries without them and logs `Dashboard detail query failed with variables — retrying without them`; those dashboards have no `variables` field.
+
 ---
 
 ## account_ACCOUNTID/alerts/policies.json
@@ -387,7 +389,7 @@ v1.3.7 (`.ps1` v1.0.3). Earlier archives lack them, so every threshold reads as 
           }
         ],
         "remainingEntitiesRule": {
-          "remainingEntitiesRuleRollup": { "strategy": "BEST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
+          "rollup": { "groupBy": "ENTITY_TYPE", "strategy": "BEST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
         }
       },
       "static": []
@@ -397,8 +399,8 @@ v1.3.7 (`.ps1` v1.0.3). Earlier archives lack them, so every threshold reads as 
 ```
 
 The first six fields come from the `WorkloadEntity` (metadata only). The rest are
-merged in by `guid` from `actor.account(id).workload.collections`, since v1.3.8
-(`.ps1` v1.0.5):
+merged in by `guid` from `actor.account(id).workload.collection(guid:)`, since v1.3.9
+(`.ps1` v1.0.6):
 
 | Field | Notes |
 |-------|-------|
@@ -406,9 +408,9 @@ merged in by `guid` from `actor.account(id).workload.collections`, since v1.3.8
 | `entitySearchQueries` | Membership queries, `[{id, query}]`; `[]` when the workload is defined only by static entities |
 | `entityGuids` | Statically added members (from `entities[].guid`); `[]` when none |
 | `scopeAccounts.accountIds` | Accounts the workload's queries search |
-| `statusConfig` | Health rules: `automatic` (rules plus a rule for the remaining entities) and/or `static` (a fixed status) |
+| `statusConfig` | Health rules: `automatic` (rules plus a rule for the remaining entities) and/or `static` (a fixed status). `automatic.rules[].rollup` has `strategy`, `thresholdType`, `thresholdValue`; `automatic.remainingEntitiesRule.rollup` also has `groupBy` |
 
-If the definitions query fails, the export logs `Workload definitions query failed — workloads exported WITHOUT entity queries or status rules` and still writes the metadata. A workload with no matching definition keeps `entitySearchQueries: []`, `entityGuids: []` and `null` for the rest. Archives before v1.3.8 have metadata only; the `entitySearchQuery` string documented here earlier was never produced.
+Definitions are fetched in batches of 25. If a batch fails, each workload in it is fetched on its own. A workload whose definition cannot be fetched is logged (`N workload(s) exported WITHOUT entity queries or status rules (no definition returned)`) and keeps `entitySearchQueries: []`, `entityGuids: []` and `null` for the rest. Archives before v1.3.9 have metadata only: v1.3.8 (`.ps1` v1.0.5) selected `remainingEntitiesRule { remainingEntitiesRuleRollup }`, which is not in the NerdGraph schema (the field is `rollup`), so its definitions query always failed. The `entitySearchQuery` string documented here earlier was never produced.
 
 ---
 
