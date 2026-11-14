@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.5
+    DMA New Relic Export Script v1.0.6
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.5"
+$ScriptVersion    = "1.0.6"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -315,6 +315,22 @@ function Export-DashboardsForAccount {
     Log-Debug "    Phase 1 complete: $($allGuids.Count) dashboard GUIDs"
 
     # Phase 2 — batch-fetch full details
+    # The `variables` selection is the newest part of this query. GraphQL
+    # rejects a whole query when any field in it is invalid, so a schema change
+    # under `variables` would otherwise drop every dashboard. If a batch fails,
+    # retry it without `variables` and stop asking for them for the rest of
+    # this account (same as bash v1.3.9). Field list checked by live
+    # introspection (2026-11-13).
+    $variablesSel = @"
+variables {
+          name title type isMultiSelection replacementStrategy
+          defaultValues { value { string } }
+          items { title value }
+          nrqlQuery { accountIds query }
+          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
+        }
+"@
+    $wantVariables = $true
     $allEntities = @()
     $start       = 0
     $batchNum    = 1
@@ -323,20 +339,18 @@ function Export-DashboardsForAccount {
         $batch       = $allGuids[$start..([Math]::Min($start + $EntityFetchBatch - 1, $allGuids.Count - 1))]
         $guidsLiteral = '["' + ($batch -join '","') + '"]'
 
-        $detailQuery = @"
+        $detailResponse = $null
+        $retriedWithout = $false
+        while ($true) {
+            $sel = if ($wantVariables) { $variablesSel } else { "" }
+            $detailQuery = @"
 {
   actor {
     entities(guids: $guidsLiteral) {
       ... on DashboardEntity {
         guid name description accountId createdAt updatedAt permissions
         owner { email userId }
-        variables {
-          name title type isMultiSelection replacementStrategy
-          defaultValues { value { string } }
-          items { title value }
-          nrqlQuery { accountIds query }
-          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
-        }
+        $sel
         pages {
           guid name description
           widgets {
@@ -352,7 +366,21 @@ function Export-DashboardsForAccount {
   }
 }
 "@
-        $detailResponse = Invoke-NerdGraph $detailQuery
+            $detailResponse = Invoke-NerdGraph $detailQuery
+            if ($detailResponse) { break }
+            if ($wantVariables) {
+                Log-Warn "  [Account $AccountId] Dashboard detail query failed with variables — retrying without them; dashboards from here on are exported WITHOUT variable definitions"
+                $wantVariables  = $false
+                $retriedWithout = $true
+                continue
+            }
+            break
+        }
+        if (-not $detailResponse) {
+            # Both attempts failed: `variables` was not the cause.
+            if ($retriedWithout) { $wantVariables = $true }
+            Log-Error "  [Account $AccountId] Dashboard detail batch $batchNum failed after retries — export is INCOMPLETE"
+        }
         $batchEntities  = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
@@ -624,48 +652,58 @@ function Export-WorkloadsForAccount {
 
     # Phase 3 — workload definitions. WorkloadEntity is metadata only; the
     # membership (entity search queries, static entities) and health rules live
-    # on actor.account(id).workload.collections. One query per account, merged
-    # into each workload by guid — same shape as the bash export (v1.3.8).
-    # Schema traps: WorkloadEntity.collection is an EntityCollection (a different
-    # type without these fields), and WorkloadRollup has no groupBy — selecting
-    # it fails the whole query.
+    # on actor.account(id).workload.collection(guid:) (deprecated in NerdGraph,
+    # like `collections`; see the bash script). Each batch asks for its
+    # workloads by guid under GraphQL aliases (w0, w1, ...); a failed batch is
+    # retried one workload at a time. Same shape as the bash export (v1.3.9).
+    # Schema traps (checked by live introspection):
+    # WorkloadEntity.collection is an EntityCollection (a different type);
+    # WorkloadRollup has no groupBy; remainingEntitiesRule's field is `rollup`.
     if ($allWorkloads.Count -gt 0) {
-        $defsQuery = @"
-{
-  actor {
-    account(id: $AccountId) {
-      workload {
-        collections {
-          guid description
-          entities { guid }
-          entitySearchQueries { id query }
-          scopeAccounts { accountIds }
-          statusConfig {
-            automatic {
-              enabled
-              rules {
-                id
-                entities { guid }
-                entitySearchQueries { id query }
-                rollup { strategy thresholdType thresholdValue }
-              }
-              remainingEntitiesRule {
-                remainingEntitiesRuleRollup { strategy thresholdType thresholdValue }
-              }
+        $collSel = @"
+guid description
+        entities { guid }
+        entitySearchQueries { id query }
+        scopeAccounts { accountIds }
+        statusConfig {
+          automatic {
+            enabled
+            rules {
+              id
+              entities { guid }
+              entitySearchQueries { id query }
+              rollup { strategy thresholdType thresholdValue }
             }
-            static { id enabled status summary description }
+            remainingEntitiesRule {
+              rollup { groupBy strategy thresholdType thresholdValue }
+            }
           }
+          static { id enabled status summary description }
         }
-      }
-    }
-  }
-}
 "@
-        try {
-            $defsResponse = Invoke-NerdGraph $defsQuery
-            $collections  = if ($defsResponse) { Get-JsonPath $defsResponse 'data.actor.account.workload.collections' } else { $null }
-            if ($null -eq $collections) { throw "no workload.collections in response" }
+        $wlGuids     = @($allWorkloads | ForEach-Object { [string]$_.guid } | Where-Object { $_ })
+        $collections = @()
+        $defsFailed  = 0
+        for ($s0 = 0; $s0 -lt $wlGuids.Count; $s0 += $EntityFetchBatch) {
+            $batch   = @($wlGuids[$s0..([Math]::Min($s0 + $EntityFetchBatch - 1, $wlGuids.Count - 1))])
+            $aliased = for ($i = 0; $i -lt $batch.Count; $i++) { "w${i}: collection(guid: `"$($batch[$i])`") { $collSel }" }
+            $defsResponse = Invoke-NerdGraph "{ actor { account(id: $AccountId) { workload { $($aliased -join "`n") } } } }"
+            $wlNode = if ($defsResponse) { Get-JsonPath $defsResponse 'data.actor.account.workload' } else { $null }
+            if ($wlNode) {
+                $collections += @($wlNode.psobject.Properties | ForEach-Object { $_.Value } | Where-Object { $_ -and (Get-JsonPath $_ 'guid') })
+            } else {
+                Log-Warn "  [Account $AccountId] Workload definitions batch failed — retrying one workload at a time"
+                foreach ($g in $batch) {
+                    Start-Sleep -Milliseconds $ApiDelayMs
+                    $one = Invoke-NerdGraph "{ actor { account(id: $AccountId) { workload { w0: collection(guid: `"$g`") { $collSel } } } } }"
+                    $c   = if ($one) { Get-JsonPath $one 'data.actor.account.workload.w0' } else { $null }
+                    if ($c -and (Get-JsonPath $c 'guid')) { $collections += $c } else { $defsFailed++ }
+                }
+            }
+            Start-Sleep -Milliseconds $ApiDelayMs
+        }
 
+        try {
             $byGuid = @{}
             foreach ($c in @($collections)) {
                 $g = Get-JsonPath $c 'guid'
@@ -682,12 +720,12 @@ function Export-WorkloadsForAccount {
                 $wl | Add-Member -Force -NotePropertyName scopeAccounts       -NotePropertyValue (Get-JsonPath $c 'scopeAccounts')
                 $wl | Add-Member -Force -NotePropertyName statusConfig        -NotePropertyValue (Get-JsonPath $c 'statusConfig')
             }
-            Log-Debug "    Phase 3 complete: $($byGuid.Count) workload definitions, $unmatched workload(s) without one"
+            Log-Debug "    Phase 3 complete: $($byGuid.Count) workload definitions, $unmatched workload(s) without one ($defsFailed failed)"
             if ($unmatched -gt 0) {
-                Log-Warn "  [Account $AccountId] $unmatched workload(s) had no definition in workload.collections — exported as metadata only"
+                Log-Warn "  [Account $AccountId] $unmatched workload(s) exported WITHOUT entity queries or status rules (no definition returned)"
             }
         } catch {
-            Log-Warn "  [Account $AccountId] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules ($_)"
+            Log-Warn "  [Account $AccountId] Could not merge workload definitions — workloads exported WITHOUT entity queries or status rules ($_)"
         }
     }
 
