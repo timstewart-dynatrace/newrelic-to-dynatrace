@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
+## [1.3.10] - 2026-11-14
+
+### Fixed
+
+- **Stray numbers in the console output of supplemental exports.** Each of the 8 supplemental export functions ended with `echo "$count"` (the lookup-tables one with `echo "0"`), left over from `nr-supplemental-export.sh`. The main loop doesn't capture that output, so a bare number printed after each `✓ <type>: N` line. The echoes are removed. The log lines, the files written and the archive are unchanged. The `.ps1` has no supplemental exports yet, so it isn't affected.
+
 ## [1.3.9] - 2026-11-13
 
 ### Fixed
