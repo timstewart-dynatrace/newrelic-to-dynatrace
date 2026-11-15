@@ -11,7 +11,7 @@ fi
 #
 #  DMA New Relic Export Script
 #
-#  Version: v1.3.9            Released: 2026-11-13
+#  Version: v1.3.10           Released: 2026-11-14
 #
 #  (This line and the SCRIPT_VERSION constant are checked against each other at
 #   startup — if they ever disagree the script says so on stderr. The banner
@@ -101,7 +101,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.9"
+readonly SCRIPT_VERSION="1.3.10"
 
 # Banner/constant drift guard. The header comment is what a human reads when
 # they open this file, so it must not silently disagree with what actually runs
@@ -1355,7 +1355,6 @@ export_ai_workflows() {
     local count
     count=$(jq '.totalCount // (.entities | length) // 0' "$outdir/aiWorkflows.json")
     log_ok "    aiWorkflows: ${count} workflows"
-    echo "$count"
 }
 
 export_ai_destinations() {
@@ -1393,7 +1392,6 @@ export_ai_destinations() {
     local count
     count=$(jq '.totalCount // (.entities | length) // 0' "$outdir/aiNotificationsDestinations.json")
     log_ok "    destinations: ${count}"
-    echo "$count"
 }
 
 export_muting_rules() {
@@ -1439,7 +1437,6 @@ export_muting_rules() {
     local count
     count=$(jq 'length' "$outdir/alertsMutingRules.json" 2>/dev/null || echo 0)
     log_ok "    muting rules: ${count}"
-    echo "$count"
 }
 
 export_drop_rules() {
@@ -1473,7 +1470,6 @@ export_drop_rules() {
     local count
     count=$(jq '.rules | length' "$outdir/nrqlDropRules.json" 2>/dev/null || echo 0)
     log_ok "    drop rules: ${count}"
-    echo "$count"
 }
 
 export_log_configs() {
@@ -1504,7 +1500,6 @@ export_log_configs() {
     local count
     count=$(jq 'length' "$outdir/logConfigurations.json" 2>/dev/null || echo 0)
     log_ok "    parsing rules: ${count}"
-    echo "$count"
 }
 
 export_lookup_tables() {
@@ -1527,7 +1522,6 @@ export_lookup_tables() {
 }
 JSON
     log_warn "    lookup tables: schema fields not introspectable; placeholder pointing at source CSVs"
-    echo "0"
 }
 
 export_events_to_metrics() {
@@ -1558,7 +1552,6 @@ export_events_to_metrics() {
     local count
     count=$(jq '.rules | length' "$outdir/eventsToMetricsRules.json" 2>/dev/null || echo 0)
     log_ok "    E2M rules: ${count}"
-    echo "$count"
 }
 
 export_entity_tags() {
@@ -1597,7 +1590,6 @@ export_entity_tags() {
     local count
     count=$(jq '.count // (.results.entities | length) // 0' "$outdir/entityTags.json" 2>/dev/null || echo 0)
     log_ok "    tagged entities: ${count}"
-    echo "$count"
 }
 
 # =============================================================================
