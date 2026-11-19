@@ -23,6 +23,7 @@ Apply them **in order**. Each directive is cut against the state the previous on
 |---|---|---|---|---|
 | 1 | [2026-11-05-v1.3.7-alert-terms.md](2026-11-05-v1.3.7-alert-terms.md) | `v1.3.7` | `20e8b34`, `9352989` | Export alert condition `terms`, `signal` and `type`; fix the `.ps1` parse error |
 | 2 | [2026-11-07-v1.3.8-variables-workloads.md](2026-11-07-v1.3.8-variables-workloads.md) | `v1.3.8` | `2b6909f` | Export dashboard `variables` and workload definitions |
+| 3 | [2026-11-18-v1.4.0-export-breadth.md](2026-11-18-v1.4.0-export-breadth.md) | `v1.4.0-test1` | `a85f269` | Export breadth: alert conditions from every product, compound conditions, legacy channels, monitor steps/scripts, private locations, secure credential names, downtimes, plus 5 supplemental types. Cut against official v1.3.10; has 5 decisions for Tim before coding |
 
 ## For the agent watching this folder
 
