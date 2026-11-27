@@ -22,56 +22,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`README-NEWRELIC.md` prerequisites corrected — jq, not python3** (docs only, no script change). The detailed setup guide carried over dynabridge-era instructions telling users to install python3 3.6+ and bash 5; the script actually requires jq and targets bash 3.2. Prerequisites table now lists bash 3.2+/curl/jq/tar with install commands, the NerdGraph example pipes to `jq .` instead of `python3 -m json.tool`, and troubleshooting covers `command not found: jq` plus the CRLF auto-fix instead of the obsolete python3/bash-5 entries. The root `README.md` was already correct. (Redone from abandoned-branch commit `6e62f43`, archived at `archive/feature-parity-with-splunk`.)
 
-## [1.3.8] - 2026-11-07
+## [1.3.10] - 2026-11-14
 
 ### Fixed
 
-- **🔴 Dashboard variables were not exported.** The `DashboardEntity` selection had no `variables` field. Widget queries kept their `{{name}}` placeholders, but the archive had no definitions to resolve them against. The selection now includes `variables` with every `DashboardVariable` field: `name title type isMultiSelection replacementStrategy`, `defaultValues { value { string } }`, `items { title value }`, `nrqlQuery { accountIds query }` and `options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }`. The dashboard-level `description` is now selected too.
-- **🔴 Workload definitions were not exported.** `WorkloadEntity` returns metadata only. Membership and health rules live on `account.workload.collections`, which the exporter never queried, so every workload arrived with no entity search queries, no static entities and no status rules. A third phase now queries the account's collections and merges these fields into each workload by `guid`:
-  - `description`
-  - `entitySearchQueries [{query}]`
-  - `entityGuids` (from `entities[].guid`)
-  - `scopeAccounts`
-  - `statusConfig`: automatic rules and rollups, plus static statuses
+- **Stray numbers in the console output of supplemental exports.** Each of the 8 supplemental export functions ended with `echo "$count"` (the lookup-tables one with `echo "0"`), left over from `nr-supplemental-export.sh`. The main loop doesn't capture that output, so a bare number printed after each `✓ <type>: N` line. The echoes are removed. The log lines, the files written and the archive are unchanged. The `.ps1` has no supplemental exports yet, so it isn't affected.
 
-  The field names match what `@dma/newrelic-converter` already reads (`NRWorkload.entitySearchQueries`, `entityGuids`, `description`). If the definitions query fails, the exporter logs a warning and still writes the metadata.
+## [1.3.9] - 2026-11-13
 
-  **Verified against NerdGraph** on test account 8018100, with both the `.sh` and the `.ps1` (`.ps1` v1.0.4), and identical output from each:
-  - 90 dashboards exported; the two with variables carry all their definitions (3 on the templated dashboard: an NRQL multi-select, an ENUM and a STRING `IDENTIFIER`)
-  - all 5 workloads carry 1 entity search query and 5 automatic status rules
-  - the converter now passes the workload query and description through; previously both were missing
+### Fixed
+
+- **Workload definitions were never exported (v1.3.8).** The v1.3.8 definitions query selected `remainingEntitiesRule { remainingEntitiesRuleRollup }`, but NerdGraph's field is `rollup`, so it always failed with `Cannot query field "remainingEntitiesRuleRollup" on type "WorkloadRemainingEntitiesRule"`, and every workload was exported as metadata only. Both scripts now select `remainingEntitiesRule { rollup { groupBy strategy thresholdType thresholdValue } }` (bash v1.3.9, `.ps1` v1.0.6). **Archive shape change:** `statusConfig.automatic.remainingEntitiesRule.rollup` (v1.3.8 never produced the old key).
+- **Workload definitions are fetched by guid.** Instead of one `workload.collections` list query per account, each script asks for the workloads it found with `workload.collection(guid:)`, 25 per query under GraphQL aliases, and retries a failed batch one workload at a time. One bad workload no longer drops every definition, and only the exported workloads are fetched. Both fields are deprecated in NerdGraph in favour of `WorkloadEntity.healthCriteria` / `collection.definition`; moving to those changes the archive shape and is left for a later release.
 
 ### Changed
 
-- `EXPORT-SCHEMA.md`: the dashboards section documents `description` and `variables`. The workloads section had shown an `entitySearchQuery` string that the exporter never produced and the converter never read; it now documents `entitySearchQueries`, `entityGuids`, `description`, `scopeAccounts` and `statusConfig`.
+- **A failed dashboard detail query no longer ends silently with 0 dashboards.** If a batch fails while selecting `variables`, the scripts retry it without them and log a warning; if the retry also fails, they log `Dashboard detail batch N failed after retries — export is INCOMPLETE`. Previously a failed batch was dropped and the run still reported `Exported N dashboards` as a success.
 
-### Known issues
+Checked by live NerdGraph introspection and a live run (2026-11-13): 90 dashboards exported with `variables` (NRQL, ENUM and STRING types present), and all 5 workloads exported with definitions. The unfixed v1.3.8 exported the same 90 dashboards but no workload definitions.
 
-- `.ps1` `-All` / `-ServiceLevels` still fail at service levels (the pre-v1.3.3 `account.serviceLevel` shape). This is unchanged from v1.3.7; use `-Dashboards -Alerts -Synthetics -Workloads` on Windows until the port lands.
+## [1.3.8] - 2026-11-13
+
+### Added
+
+- **Dashboard variables and descriptions are exported.** The `DashboardEntity` selection had no `variables` and no dashboard-level `description` (only `pages[].description`). Widget NRQL kept its `{{name}}` placeholders, but the archive carried no definition of what `name` was, so a templated dashboard could not be converted faithfully. Both scripts now select `description` and `variables { name title type isMultiSelection replacementStrategy defaultValues { value { string } } items { title value } nrqlQuery { accountIds query } options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction } }` (bash v1.3.8, `.ps1` v1.0.5).
+
+- **Workload definitions are exported.** Workloads were fetched as `WorkloadEntity`, which is metadata only (guid, name, timestamps, permalink, tags), so every exported workload had no entity search queries, no static members and no status rules. After the workload batches, each script now runs one `actor.account(id).workload.collections` query per account and merges `description`, `entitySearchQueries` (default `[]`), `entityGuids` (from `entities[].guid`, default `[]`), `scopeAccounts` and `statusConfig` into each workload by `guid`. The query is skipped for accounts with no workloads.
+
+  This never fails the export. If the query fails, the script logs `Workload definitions query failed — workloads exported WITHOUT entity queries or status rules` and writes the metadata. A workload with no matching definition is logged as a warning (`… had no definition in workload.collections — exported as metadata only`) and keeps the `[]` / `null` defaults; it is not otherwise flagged in the archive.
+
+  Schema traps, noted in the code: `WorkloadEntity.collection` is an `EntityCollection` (a different type without these fields), and `WorkloadRollup` has no `groupBy`, so selecting it fails the whole query. `groupBy` is not selected on the remaining-entities rollup either.
+
+  The new fields are additive and match what `@dma/newrelic-converter`'s `NRWorkload` already reads (`entitySearchQueries: [{query}]`, `entityGuids`, `description`).
+
+### Fixed
+
+- **🔴 `dma-newrelic-export.ps1`: `-All` / `-ServiceLevels` aborted and wrote no archive (`.ps1` v1.0.4).** `Export-ServiceLevelsForAccount` still queried `actor.account(id:).serviceLevel`, which NerdGraph rejects (`Cannot query field serviceLevel on type Account`). With no data, `Merge-Arrays` returned `$null` (a PowerShell function unrolls an empty array), and under `Set-StrictMode -Version Latest` the `.Count` read on it threw `The property 'Count' cannot be found`, ending the whole run.
+
+  Ported the bash entity-based query (v1.3.3): phase 1 finds `SERVICE_LEVEL` entity GUIDs with `entitySearch` (cursor on `results`, per the v1.3.5 fix), phase 2 fetches `... on ExternalEntity { serviceLevel { indicators { ... } } }` in batches of `$EntityFetchBatch`. `service_levels/indicators.json` now has the same shape as the bash export (the old `.ps1` query also selected `events.account`, which bash does not).
+
+  A service-level failure now degrades instead of aborting: the function logs an error, writes whatever it collected (`[]` at minimum) and marks the count `INCOMPLETE`, and the remaining phases and the archive still run. New `Get-JsonPath` helper reads nested response fields without tripping StrictMode on missing or null properties.
+
+  Verified with a parser check (0 errors) and mocked NerdGraph runs under StrictMode: paged search with 3 SLIs, 0 SLIs, exactly 1 SLI, API failure, and an exception mid-run. **Not yet verified live** against a New Relic account.
+
+- **`.ps1` `-Workloads` threw on an account with 0 or 1 workloads.** `$pageGuids = if (...) { @(...) } else { @() }` unrolls the array, so 0 GUIDs gave `$null`, 1 gave a bare string, and StrictMode threw `The property 'Count' cannot be found`. With 0 workloads the error also left a `$null` GUID behind, which was sent as `entities(guids: [""])`. The search and detail reads now use `Get-JsonPath` wrapped in `@()`, both accumulators are wrapped in `@()` against the `Merge-Arrays` unroll, and `workloads.json` is always written as an array.
+
+- **`Get-JsonPath` (added in `.ps1` v1.0.4) now yields nothing for a missing or null value instead of `$null`.** `@(Get-JsonPath …)` on a missing list was `@($null)`, with `Count` 1. Assignment still gives `$null`.
+
+### Changed
+
+- **`EXPORT-SCHEMA.md` workload section corrected.** It documented an `entitySearchQuery` string that the exporter never produced and the converter never read. It now documents `entitySearchQueries`, `entityGuids`, `description`, `scopeAccounts` and `statusConfig`. The dashboard section documents `description` and `variables`.
+
+### Verification
+
+- `bash -n` and the PowerShell parser report no errors.
+- Both workload functions were run with mocked NerdGraph responses: definitions merged by `guid` (description, 1 query, 2 static GUIDs, 1 rule), an unmatched workload keeps `[]`/`null` and logs the warning, and a failed or empty definitions query writes metadata only with the warning. The `.ps1` was also run with exactly 1 and 0 workloads, under StrictMode. The `.ps1` service-level tests from v1.0.4 still pass.
+
+### Not verified
+
+- Neither script has been run live against a New Relic account with this change. The `workload.collections` selection is written from the NerdGraph schema as documented, not checked by introspection. Before tagging, run both scripts against an account with workloads and a templated dashboard (see the test plan in issue #1).
 
 ## [1.3.7] - 2026-11-05
 
 ### Fixed
 
-- **🔴 Alert conditions exported with no thresholds.** The `nrqlConditionsSearch` query selected only `id name description enabled entityGuid policyId nrql expiration`. It never selected `type`, `terms`, `signal`, `runbookUrl` or `violationTimeLimitSeconds`, although `EXPORT-SCHEMA.md` documented all of them. Downstream, every condition read as `threshold: null`. `@dma/newrelic-converter` fell back to threshold `0`, a 60 s duration and the CRITICAL priority (`AlertConverter.ts:134-136`). Its alert-pool routing (`alertPool.ts:conditionIntervalMinutes`) never saw `signal.aggregationWindow`, so every condition defaulted to a Davis anomaly detector.
+- **🔴 Alert conditions exported with no thresholds.** The `nrqlConditionsSearch` query selected only `id name description enabled entityGuid policyId nrql expiration`. It never selected `type`, `terms`, `signal`, `runbookUrl` or `violationTimeLimitSeconds`, although `EXPORT-SCHEMA.md` documented all of them. Downstream, every condition read as `threshold: null`, so the converter fell back to threshold `0`, a 60 s duration and the CRITICAL priority. Alert-pool routing never saw `signal.aggregationWindow`, so every condition defaulted to a Davis anomaly detector.
 
-  The query now selects all five fields, plus `baselineDirection` for baseline conditions and `expectedGroups` / `openViolationOnGroupOverlap` for outlier conditions (inline fragments).
+  The query now selects all five fields, plus `baselineDirection` for baseline conditions and `expectedGroups` / `openViolationOnGroupOverlap` for outlier conditions (inline fragments). Applied to both the bash script (v1.3.7) and the PowerShell port (v1.0.3).
 
-  **Verified against NerdGraph** on test account 8018100 (47 conditions: 42 static, 5 baseline):
+  **Verified against NerdGraph** on a test account (47 conditions: 42 static, 5 baseline):
   - the top-level `terms` selection is accepted for every condition type, so no per-type fragments are needed for it
-  - all 47 conditions now export `terms`, with 0 null thresholds
+  - all 47 conditions export `terms`, with 0 null thresholds
   - all 47 export `signal.aggregationWindow`
   - all 5 baselines export `baselineDirection`
 
-  The additive fields need no `ArchiveParser` change: `normalizeCondition()` in `alertAssembly.ts` already maps `type`, `terms`, `signal` and `violationTimeLimitSeconds`.
+  The fields are additive; older archives that lack them still parse.
 
-  ⚠️ **Downstream consequence:** a baseline condition's `terms[].threshold` is a number of standard deviations. A converter that treats it as a static threshold will produce a wrong detector. One test-account example is LOWER_ONLY "Throughput drop anomaly", which would become `ABOVE 4`.
+  ⚠️ **Downstream consequence:** a baseline condition's `terms[].threshold` is a number of standard deviations. A converter that treats it as a static threshold produces a wrong detector (for example a LOWER_ONLY baseline at 4 becomes `ABOVE 4`).
 
-- **🔴 `dma-newrelic-export.ps1` did not parse (v1.0.2).** Six `Log-Debug` strings wrote `"$page:"` / `"$batchNum:"`. PowerShell reads `$name:` as a scope-qualified variable, so the whole script failed with a `ParserError` before running anything. Now written as `${page}:` / `${batchNum}:` (`.ps1` v1.0.3). Verified with `pwsh` 0 parse errors and a live run that exports 47 conditions with terms.
+- **🔴 `dma-newrelic-export.ps1` did not parse (v1.0.2).** Six `Log-Debug` strings wrote `"$page:"` / `"$batchNum:"`. PowerShell reads `$name:` as a scope-qualified variable, so the whole script failed with a `ParserError` before running anything. Now written as `${page}:` / `${batchNum}:` (`.ps1` v1.0.3).
 
 ### Known issues
 
-- **`.ps1` service-level export still fails.** It queries `account.serviceLevel`, which NerdGraph rejects ("Cannot query field serviceLevel on type Account"; the bash script moved to the entity-based shape in v1.3.3). With `-All` or `-ServiceLevels`, the script throws after the retries (`The property 'Count' cannot be found`) and writes no archive. `-Dashboards -Alerts -Synthetics -Workloads` runs complete.
+- **`.ps1` service-level export still fails.** It queries `account.serviceLevel`, which NerdGraph rejects ("Cannot query field serviceLevel on type Account"; the bash script moved to the entity-based shape in v1.3.3). With `-All` or `-ServiceLevels` the script throws after the retries (`The property 'Count' cannot be found`) and writes no archive. Runs with `-Dashboards -Alerts -Synthetics -Workloads` complete.
 
 ## [1.3.6] - 2026-08-10
 

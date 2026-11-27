@@ -159,16 +159,16 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
     },
     "variables": [
       {
-        "name": "services",
-        "title": "Services",
+        "name": "appName",
+        "title": "Application",
         "type": "NRQL",
         "isMultiSelection": true,
         "replacementStrategy": "STRING",
-        "defaultValues": [ { "value": { "string": "*" } } ],
+        "defaultValues": [{ "value": { "string": "checkout-api" } }],
         "items": null,
         "nrqlQuery": {
           "accountIds": [1234567],
-          "query": "FROM Transaction SELECT uniques(appName) SINCE 1 day ago"
+          "query": "SELECT uniques(appName) FROM Transaction"
         },
         "options": {
           "excluded": false,
@@ -176,17 +176,6 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
           "ignoreTimeRange": false,
           "showApplyAction": false
         }
-      },
-      {
-        "name": "severity",
-        "title": "Severity",
-        "type": "ENUM",
-        "isMultiSelection": null,
-        "replacementStrategy": "STRING",
-        "defaultValues": [ { "value": { "string": "ERROR" } } ],
-        "items": [ { "title": "Error", "value": "ERROR" }, { "title": "Warn", "value": "WARN" } ],
-        "nrqlQuery": null,
-        "options": { "excluded": false, "hiddenOnVariablesBar": false, "ignoreTimeRange": false, "showApplyAction": false }
       }
     ],
     "pages": [
@@ -219,11 +208,19 @@ Array of dashboard entities from NerdGraph `entitySearch(type='DASHBOARD')`.
 ]
 ```
 
-Widget queries reference variables as `{{name}}`. `type` is `NRQL`, `ENUM` or `STRING`;
-`replacementStrategy` is `DEFAULT`, `IDENTIFIER`, `NUMBER` or `STRING`.
+`description` (dashboard level) and `variables` are exported since v1.3.8 (`.ps1`
+v1.0.5); earlier archives lack both. Widget NRQL keeps its `{{name}}`
+placeholders, and `variables[].name` is what they refer to.
 
-`description` and `variables` are exported from v1.3.8 (`.ps1` v1.0.4). In earlier archives,
-widget queries keep their `{{name}}` placeholders but the variable definitions are missing.
+| Field | Values / notes |
+|-------|----------------|
+| `type` | `NRQL` (options come from `nrqlQuery`), `ENUM` (options are `items[]`, each `{title, value}`), `STRING` (free text) |
+| `replacementStrategy` | `DEFAULT`, `IDENTIFIER`, `NUMBER`, `STRING` — how the selected value is substituted into NRQL |
+| `isMultiSelection` | `true` when more than one value can be selected |
+| `defaultValues[].value.string` | Default selection(s); empty when there is none |
+| `options` | `excluded`, `hiddenOnVariablesBar`, `ignoreTimeRange`, `showApplyAction` |
+
+Since v1.3.9 (`.ps1` v1.0.6), if the dashboard query fails with `variables`, the export retries without them and logs `Dashboard detail query failed with variables — retrying without them`; those dashboards have no `variables` field.
 
 ---
 
@@ -372,27 +369,28 @@ v1.3.7 (`.ps1` v1.0.3). Earlier archives lack them, so every threshold reads as 
     "tags": [
       { "key": "team", "values": ["ecommerce"] }
     ],
-    "description": "Checkout and catalog services",
+    "description": "Customer-facing checkout path",
     "entitySearchQueries": [
-      { "query": "type IN ('APPLICATION', 'SERVICE') AND tags.team = 'ecommerce'" }
+      { "id": "1001", "query": "type IN ('APPLICATION', 'SERVICE') AND tags.team = 'ecommerce'" }
     ],
-    "entityGuids": ["MTIzNDU2N3xBUE18QVBQTElDQVRJT058MQ"],
+    "entityGuids": ["MTIzNDU2N3xBUE18QVBQTElDQVRJT058MTIz"],
     "scopeAccounts": {
       "accountIds": [1234567, 8901234]
     },
     "statusConfig": {
       "automatic": {
         "enabled": true,
-        "remainingEntitiesRule": {
-          "rollup": { "strategy": "WORST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
-        },
         "rules": [
           {
-            "entitySearchQueries": [ { "query": "type = 'APPLICATION'" } ],
+            "id": "2001",
             "entities": [],
-            "rollup": { "strategy": "BEST_STATUS_WINS", "thresholdType": "FIXED", "thresholdValue": 1 }
+            "entitySearchQueries": [{ "id": "3001", "query": "type = 'APPLICATION'" }],
+            "rollup": { "strategy": "WORST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
           }
-        ]
+        ],
+        "remainingEntitiesRule": {
+          "rollup": { "groupBy": "ENTITY_TYPE", "strategy": "BEST_STATUS_WINS", "thresholdType": null, "thresholdValue": null }
+        }
       },
       "static": []
     }
@@ -400,12 +398,19 @@ v1.3.7 (`.ps1` v1.0.3). Earlier archives lack them, so every threshold reads as 
 ]
 ```
 
-`guid`, `name`, `accountId`, `createdAt`, `updatedAt`, `permalink` and `tags` come from the
-`WorkloadEntity`. The definition fields (`description`, `entitySearchQueries`, `entityGuids`,
-`scopeAccounts`, `statusConfig`) come from `account.workload.collections` and are merged in by
-`guid`. They are exported from v1.3.8 (`.ps1` v1.0.4). Earlier archives carry only the entity
-metadata, so a workload has no membership rules. `entityGuids` lists statically added entities.
-If the definitions query fails, the exporter logs a warning and writes the metadata alone.
+The first six fields come from the `WorkloadEntity` (metadata only). The rest are
+merged in by `guid` from `actor.account(id).workload.collection(guid:)`, since v1.3.9
+(`.ps1` v1.0.6):
+
+| Field | Notes |
+|-------|-------|
+| `description` | `null` when the workload has none |
+| `entitySearchQueries` | Membership queries, `[{id, query}]`; `[]` when the workload is defined only by static entities |
+| `entityGuids` | Statically added members (from `entities[].guid`); `[]` when none |
+| `scopeAccounts.accountIds` | Accounts the workload's queries search |
+| `statusConfig` | Health rules: `automatic` (rules plus a rule for the remaining entities) and/or `static` (a fixed status). `automatic.rules[].rollup` has `strategy`, `thresholdType`, `thresholdValue`; `automatic.remainingEntitiesRule.rollup` also has `groupBy` |
+
+Definitions are fetched in batches of 25. If a batch fails, each workload in it is fetched on its own. A workload whose definition cannot be fetched is logged (`N workload(s) exported WITHOUT entity queries or status rules (no definition returned)`) and keeps `entitySearchQueries: []`, `entityGuids: []` and `null` for the rest. Archives before v1.3.9 have metadata only: v1.3.8 (`.ps1` v1.0.5) selected `remainingEntitiesRule { remainingEntitiesRuleRollup }`, which is not in the NerdGraph schema (the field is `rollup`), so its definitions query always failed. The `entitySearchQuery` string documented here earlier was never produced.
 
 ---
 

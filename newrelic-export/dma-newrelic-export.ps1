@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DMA New Relic Export Script v1.0.4
+    DMA New Relic Export Script v1.0.6
 
 .DESCRIPTION
     Exports New Relic dashboards, alerts, synthetic monitors, workloads, service
@@ -97,7 +97,7 @@ $ErrorActionPreference = "Stop"
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-$ScriptVersion    = "1.0.4"
+$ScriptVersion    = "1.0.6"
 $SchemaVersion    = "1.0"
 $ApiEndpointUS    = "https://api.newrelic.com/graphql"
 $ApiEndpointEU    = "https://api.eu.newrelic.com/graphql"
@@ -227,6 +227,23 @@ function Count-JsonFile {
     } catch { return 0 }
 }
 
+function Get-JsonPath {
+    # StrictMode-safe nested read: yields nothing if any segment is missing or
+    # null instead of throwing (StrictMode throws on both). Emitting nothing,
+    # not $null, matters: `$x = Get-JsonPath ...` still gives $null, but
+    # `@(Get-JsonPath ...)` is then an empty array instead of @($null) with
+    # Count 1. Arrays unroll on output, so wrap list reads in @(...).
+    param([object]$Object, [string]$Path)
+    foreach ($segment in $Path.Split('.')) {
+        if ($null -eq $Object) { return }
+        $prop = $Object.psobject.Properties[$segment]
+        if (-not $prop) { return }
+        $Object = $prop.Value
+    }
+    if ($null -eq $Object) { return }
+    return $Object
+}
+
 function Merge-Arrays {
     param([array]$A, [array]$B)
     return @($A) + @($B)
@@ -298,6 +315,22 @@ function Export-DashboardsForAccount {
     Log-Debug "    Phase 1 complete: $($allGuids.Count) dashboard GUIDs"
 
     # Phase 2 — batch-fetch full details
+    # The `variables` selection is the newest part of this query. GraphQL
+    # rejects a whole query when any field in it is invalid, so a schema change
+    # under `variables` would otherwise drop every dashboard. If a batch fails,
+    # retry it without `variables` and stop asking for them for the rest of
+    # this account (same as bash v1.3.9). Field list checked by live
+    # introspection (2026-11-13).
+    $variablesSel = @"
+variables {
+          name title type isMultiSelection replacementStrategy
+          defaultValues { value { string } }
+          items { title value }
+          nrqlQuery { accountIds query }
+          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
+        }
+"@
+    $wantVariables = $true
     $allEntities = @()
     $start       = 0
     $batchNum    = 1
@@ -306,20 +339,18 @@ function Export-DashboardsForAccount {
         $batch       = $allGuids[$start..([Math]::Min($start + $EntityFetchBatch - 1, $allGuids.Count - 1))]
         $guidsLiteral = '["' + ($batch -join '","') + '"]'
 
-        $detailQuery = @"
+        $detailResponse = $null
+        $retriedWithout = $false
+        while ($true) {
+            $sel = if ($wantVariables) { $variablesSel } else { "" }
+            $detailQuery = @"
 {
   actor {
     entities(guids: $guidsLiteral) {
       ... on DashboardEntity {
         guid name description accountId createdAt updatedAt permissions
         owner { email userId }
-        variables {
-          name title type isMultiSelection replacementStrategy
-          defaultValues { value { string } }
-          items { title value }
-          nrqlQuery { accountIds query }
-          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
-        }
+        $sel
         pages {
           guid name description
           widgets {
@@ -335,7 +366,21 @@ function Export-DashboardsForAccount {
   }
 }
 "@
-        $detailResponse = Invoke-NerdGraph $detailQuery
+            $detailResponse = Invoke-NerdGraph $detailQuery
+            if ($detailResponse) { break }
+            if ($wantVariables) {
+                Log-Warn "  [Account $AccountId] Dashboard detail query failed with variables — retrying without them; dashboards from here on are exported WITHOUT variable definitions"
+                $wantVariables  = $false
+                $retriedWithout = $true
+                continue
+            }
+            break
+        }
+        if (-not $detailResponse) {
+            # Both attempts failed: `variables` was not the cause.
+            if ($retriedWithout) { $wantVariables = $true }
+            Log-Error "  [Account $AccountId] Dashboard detail batch $batchNum failed after retries — export is INCOMPLETE"
+        }
         $batchEntities  = if ($detailResponse) {
             @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
         } else { @() }
@@ -561,11 +606,17 @@ function Export-WorkloadsForAccount {
 }
 "@
         $response  = Invoke-NerdGraph $query
-        $results   = if ($response) { $response.data.actor.entitySearch.results } else { $null }
-        $pageGuids = if ($results)  { @($results.entities | Where-Object { $_.guid } | ForEach-Object { $_.guid }) } else { @() }
-        $cursor    = if ($results)  { $results.nextCursor } else { $null }
+        # Get-JsonPath + @() instead of `$x = if (...) { @(...) }`: an if-statement
+        # assignment unrolls the array, so 0 or 1 GUIDs left a $null or a bare
+        # string, and StrictMode threw on .Count below.
+        $results   = Get-JsonPath $response 'data.actor.entitySearch.results'
+        $pageGuids = @(@(Get-JsonPath $results 'entities') |
+            ForEach-Object { Get-JsonPath $_ 'guid' } | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        $cursor    = Get-JsonPath $results 'nextCursor'
         Log-Debug "    Page ${page}: $($pageGuids.Count) workload GUIDs"
-        $allGuids = Merge-Arrays $allGuids $pageGuids
+        # @() keeps it an array: Merge-Arrays unrolls an empty result to $null,
+        # and StrictMode throws on $null.Count (see Export-ServiceLevelsForAccount).
+        $allGuids = @(Merge-Arrays $allGuids $pageGuids)
         $page++
         Start-Sleep -Milliseconds $ApiDelayMs
     } while ($cursor)
@@ -591,74 +642,94 @@ function Export-WorkloadsForAccount {
 }
 "@
         $detailResponse = Invoke-NerdGraph $detailQuery
-        $batchItems     = if ($detailResponse) {
-            @($detailResponse.data.actor.entities | Where-Object { $_ -and $_.guid })
-        } else { @() }
+        $batchItems     = @(@(Get-JsonPath $detailResponse 'data.actor.entities') | Where-Object { Get-JsonPath $_ 'guid' })
         Log-Debug "    Batch ${batchNum}: fetched $($batchItems.Count) workload details"
-        $allWorkloads = Merge-Arrays $allWorkloads $batchItems
+        $allWorkloads = @(Merge-Arrays $allWorkloads $batchItems)
         $start += $EntityFetchBatch
         $batchNum++
         Start-Sleep -Milliseconds $ApiDelayMs
     }
 
-    # Phase 3: workload definitions. WorkloadEntity carries metadata only; the
-    # entity queries, static entities and status rules live on
-    # account.workload.collections. Merge them into each workload by guid.
+    # Phase 3 — workload definitions. WorkloadEntity is metadata only; the
+    # membership (entity search queries, static entities) and health rules live
+    # on actor.account(id).workload.collection(guid:) (deprecated in NerdGraph,
+    # like `collections`; see the bash script). Each batch asks for its
+    # workloads by guid under GraphQL aliases (w0, w1, ...); a failed batch is
+    # retried one workload at a time. Same shape as the bash export (v1.3.9).
+    # Schema traps (checked by live introspection):
+    # WorkloadEntity.collection is an EntityCollection (a different type);
+    # WorkloadRollup has no groupBy; remainingEntitiesRule's field is `rollup`.
     if ($allWorkloads.Count -gt 0) {
-        $collectionsQuery = @"
-{
-  actor {
-    account(id: $AccountId) {
-      workload {
-        collections {
-          guid description
-          entitySearchQueries { query }
-          entities { guid }
-          scopeAccounts { accountIds }
-          statusConfig {
-            automatic {
-              enabled
-              remainingEntitiesRule { rollup { strategy thresholdType thresholdValue } }
-              rules {
-                entitySearchQueries { query }
-                entities { guid }
-                rollup { strategy thresholdType thresholdValue }
-              }
+        $collSel = @"
+guid description
+        entities { guid }
+        entitySearchQueries { id query }
+        scopeAccounts { accountIds }
+        statusConfig {
+          automatic {
+            enabled
+            rules {
+              id
+              entities { guid }
+              entitySearchQueries { id query }
+              rollup { strategy thresholdType thresholdValue }
             }
-            static { description enabled status summary }
+            remainingEntitiesRule {
+              rollup { groupBy strategy thresholdType thresholdValue }
+            }
           }
+          static { id enabled status summary description }
         }
-      }
-    }
-  }
-}
 "@
-        $collectionsResponse = Invoke-NerdGraph $collectionsQuery
-        $collections = if ($collectionsResponse -and $collectionsResponse.data.actor.account.workload) {
-            @($collectionsResponse.data.actor.account.workload.collections | Where-Object { $_ -and $_.guid })
-        } else { $null }
-
-        if ($null -eq $collections) {
-            Log-Warn "  [Account $AccountId] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules"
-        } else {
-            $byGuid = @{}
-            foreach ($c in $collections) { $byGuid[$c.guid] = $c }
-            foreach ($w in $allWorkloads) {
-                $col = $byGuid[$w.guid]
-                if (-not $col) { continue }
-                $entitySearchQueries = if ($col.entitySearchQueries) { @($col.entitySearchQueries) } else { @() }
-                $entityGuids         = if ($col.entities) { @($col.entities | ForEach-Object { $_.guid }) } else { @() }
-                $w | Add-Member -NotePropertyName description         -NotePropertyValue $col.description     -Force
-                $w | Add-Member -NotePropertyName entitySearchQueries -NotePropertyValue $entitySearchQueries -Force
-                $w | Add-Member -NotePropertyName entityGuids         -NotePropertyValue $entityGuids         -Force
-                $w | Add-Member -NotePropertyName scopeAccounts       -NotePropertyValue $col.scopeAccounts   -Force
-                $w | Add-Member -NotePropertyName statusConfig        -NotePropertyValue $col.statusConfig    -Force
+        $wlGuids     = @($allWorkloads | ForEach-Object { [string]$_.guid } | Where-Object { $_ })
+        $collections = @()
+        $defsFailed  = 0
+        for ($s0 = 0; $s0 -lt $wlGuids.Count; $s0 += $EntityFetchBatch) {
+            $batch   = @($wlGuids[$s0..([Math]::Min($s0 + $EntityFetchBatch - 1, $wlGuids.Count - 1))])
+            $aliased = for ($i = 0; $i -lt $batch.Count; $i++) { "w${i}: collection(guid: `"$($batch[$i])`") { $collSel }" }
+            $defsResponse = Invoke-NerdGraph "{ actor { account(id: $AccountId) { workload { $($aliased -join "`n") } } } }"
+            $wlNode = if ($defsResponse) { Get-JsonPath $defsResponse 'data.actor.account.workload' } else { $null }
+            if ($wlNode) {
+                $collections += @($wlNode.psobject.Properties | ForEach-Object { $_.Value } | Where-Object { $_ -and (Get-JsonPath $_ 'guid') })
+            } else {
+                Log-Warn "  [Account $AccountId] Workload definitions batch failed — retrying one workload at a time"
+                foreach ($g in $batch) {
+                    Start-Sleep -Milliseconds $ApiDelayMs
+                    $one = Invoke-NerdGraph "{ actor { account(id: $AccountId) { workload { w0: collection(guid: `"$g`") { $collSel } } } } }"
+                    $c   = if ($one) { Get-JsonPath $one 'data.actor.account.workload.w0' } else { $null }
+                    if ($c -and (Get-JsonPath $c 'guid')) { $collections += $c } else { $defsFailed++ }
+                }
             }
-            Log-Debug "    Merged definitions for $($collections.Count) workload collections"
+            Start-Sleep -Milliseconds $ApiDelayMs
+        }
+
+        try {
+            $byGuid = @{}
+            foreach ($c in @($collections)) {
+                $g = Get-JsonPath $c 'guid'
+                if ($g) { $byGuid[[string]$g] = $c }
+            }
+            $unmatched = 0
+            foreach ($wl in $allWorkloads) {
+                $c = $byGuid[[string]$wl.guid]
+                if (-not $c) { $unmatched++ }
+                $guids = @(@(Get-JsonPath $c 'entities') | ForEach-Object { Get-JsonPath $_ 'guid' } | Where-Object { $_ })
+                $wl | Add-Member -Force -NotePropertyName description         -NotePropertyValue (Get-JsonPath $c 'description')
+                $wl | Add-Member -Force -NotePropertyName entitySearchQueries -NotePropertyValue @(Get-JsonPath $c 'entitySearchQueries')
+                $wl | Add-Member -Force -NotePropertyName entityGuids         -NotePropertyValue $guids
+                $wl | Add-Member -Force -NotePropertyName scopeAccounts       -NotePropertyValue (Get-JsonPath $c 'scopeAccounts')
+                $wl | Add-Member -Force -NotePropertyName statusConfig        -NotePropertyValue (Get-JsonPath $c 'statusConfig')
+            }
+            Log-Debug "    Phase 3 complete: $($byGuid.Count) workload definitions, $unmatched workload(s) without one ($defsFailed failed)"
+            if ($unmatched -gt 0) {
+                Log-Warn "  [Account $AccountId] $unmatched workload(s) exported WITHOUT entity queries or status rules (no definition returned)"
+            }
+        } catch {
+            Log-Warn "  [Account $AccountId] Could not merge workload definitions — workloads exported WITHOUT entity queries or status rules ($_)"
         }
     }
 
-    Save-Json -Data $allWorkloads -Path (Join-Path $outDir "workloads.json")
+    Save-Json -Data $allWorkloads -Path (Join-Path $outDir "workloads.json") -AsArray
     Log-Ok "  [Account $AccountId] Exported $($allWorkloads.Count) workloads"
 }
 
@@ -673,22 +744,77 @@ function Export-ServiceLevelsForAccount {
 
     Log-Info "  [Account $AccountId] Exporting service level indicators..."
 
-    $cursor        = $null
-    $allIndicators = @()
+    # Service levels are entities (type = 'SERVICE_LEVEL', domain 'EXT') — the
+    # entity itself IS the SLI. There is no Account.serviceLevel field; the real
+    # path is entity.serviceLevel (ServiceLevelDefinition) -> indicators. Same
+    # two-phase entitySearch -> entities(guids:) pattern as the bash script
+    # (export_service_levels_for_account, v1.3.3+), so indicators.json has the
+    # identical shape.
+    #
+    # Lists are used instead of Merge-Arrays: a function returning an empty or
+    # one-element array unrolls it to $null / a scalar, and under StrictMode
+    # `$null.Count` throws — which is how the old version aborted the whole run.
+    $allGuids      = [System.Collections.Generic.List[string]]::new()
+    $allIndicators = [System.Collections.Generic.List[object]]::new()
+    $queryFailed   = $false
 
-    do {
-        $cursorArg = if ($cursor) { "(cursor: `"$cursor`")" } else { "" }
-        $query = @"
+    try {
+        # Phase 1 — discover SLI entity GUIDs. The cursor belongs on `results`,
+        # not on `entitySearch` (bash CHANGELOG v1.3.5).
+        $cursor = $null
+        $page   = 1
+        do {
+            $cursorArg = if ($cursor) { "(cursor: `"$cursor`")" } else { "" }
+            $query = @"
 {
   actor {
-    account(id: $AccountId) {
-      serviceLevel {
-        indicators$cursorArg {
-          nextCursor
-          objects {
+    entitySearch(query: "type = 'SERVICE_LEVEL' AND accountId = $AccountId") {
+      results$cursorArg {
+        entities {
+          ... on ExternalEntityOutline { guid }
+        }
+        nextCursor
+      }
+    }
+  }
+}
+"@
+            $response = Invoke-NerdGraph $query
+            if (-not $response) {
+                Log-Error "  [Account $AccountId] Service level entitySearch failed after retries (page ${page})"
+                $queryFailed = $true
+                break
+            }
+            $results   = Get-JsonPath $response 'data.actor.entitySearch.results'
+            $pageGuids = @(@(Get-JsonPath $results 'entities') |
+                ForEach-Object { Get-JsonPath $_ 'guid' } | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            foreach ($g in $pageGuids) { $allGuids.Add($g) }
+            $cursor = Get-JsonPath $results 'nextCursor'
+            Log-Debug "    Page ${page}: $($pageGuids.Count) SLI GUIDs"
+            $page++
+            Start-Sleep -Milliseconds $ApiDelayMs
+        } while ($cursor)
+
+        Log-Debug "    Phase 1 complete: $($allGuids.Count) SLI GUIDs"
+
+        # Phase 2 — batch-fetch full indicator details
+        $start    = 0
+        $batchNum = 1
+        while (-not $queryFailed -and $start -lt $allGuids.Count) {
+            $end          = [Math]::Min($start + $EntityFetchBatch, $allGuids.Count)
+            $batch        = $allGuids.GetRange($start, $end - $start)
+            $guidsLiteral = '["' + ($batch -join '","') + '"]'
+
+            $detailQuery = @"
+{
+  actor {
+    entities(guids: $guidsLiteral) {
+      ... on ExternalEntity {
+        guid
+        serviceLevel {
+          indicators {
             id name description guid entityGuid createdAt updatedAt
             events {
-              account { id name }
               validEvents { from where }
               goodEvents  { from where }
               badEvents   { from where }
@@ -704,16 +830,34 @@ function Export-ServiceLevelsForAccount {
   }
 }
 "@
-        $response  = Invoke-NerdGraph $query
-        $sli       = if ($response) { $response.data.actor.account.serviceLevel.indicators } else { $null }
-        $items     = if ($sli)      { @($sli.objects) } else { @() }
-        $cursor    = if ($sli)      { $sli.nextCursor } else { $null }
-        Log-Debug "    Fetched $($items.Count) SLIs"
-        $allIndicators = Merge-Arrays $allIndicators $items
-        Start-Sleep -Milliseconds $ApiDelayMs
-    } while ($cursor)
+            $detailResponse = Invoke-NerdGraph $detailQuery
+            if (-not $detailResponse) {
+                Log-Error "  [Account $AccountId] Service level indicator detail fetch failed after retries (batch ${batchNum})"
+                $queryFailed = $true
+                break
+            }
+            $batchCount = 0
+            foreach ($entity in @(Get-JsonPath $detailResponse 'data.actor.entities')) {
+                foreach ($indicator in @(Get-JsonPath $entity 'serviceLevel.indicators')) {
+                    if ($indicator) { $allIndicators.Add($indicator); $batchCount++ }
+                }
+            }
+            Log-Debug "    Batch ${batchNum}: fetched $batchCount SLI details"
+            $start = $end
+            $batchNum++
+            Start-Sleep -Milliseconds $ApiDelayMs
+        }
+    } catch {
+        # Degrade like the other phases: never let service levels abort the run.
+        Log-Error "  [Account $AccountId] Service level export error: $_"
+        $queryFailed = $true
+    }
 
-    Save-Json -Data $allIndicators -Path (Join-Path $outDir "indicators.json")
+    Save-Json -Data $allIndicators.ToArray() -Path (Join-Path $outDir "indicators.json") -AsArray
+    if ($queryFailed) {
+        Log-Error "  [Account $AccountId] Exported $($allIndicators.Count) service level indicators (INCOMPLETE — query failed)"
+        return
+    }
     Log-Ok "  [Account $AccountId] Exported $($allIndicators.Count) service level indicators"
 }
 

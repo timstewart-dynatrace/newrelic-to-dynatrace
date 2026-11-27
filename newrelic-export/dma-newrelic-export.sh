@@ -11,7 +11,7 @@ fi
 #
 #  DMA New Relic Export Script
 #
-#  Version: v1.3.8            Released: 2026-11-07
+#  Version: v1.3.10           Released: 2026-11-14
 #
 #  (This line and the SCRIPT_VERSION constant are checked against each other at
 #   startup — if they ever disagree the script says so on stderr. The banner
@@ -101,7 +101,7 @@ set -o pipefail  # Fail on pipe errors (not set -e — we handle errors graceful
 # SCRIPT CONFIGURATION
 # =============================================================================
 
-readonly SCRIPT_VERSION="1.3.8"
+readonly SCRIPT_VERSION="1.3.10"
 
 # Banner/constant drift guard. The header comment is what a human reads when
 # they open this file, so it must not silently disagree with what actually runs
@@ -581,27 +581,40 @@ GRAPHQL
     guid_count=$(echo "$all_guids" | jq 'length' 2>/dev/null || echo 0)
     log_debug "    Phase 1 complete: $guid_count dashboard GUIDs"
 
+    # The `variables` selection is the newest part of this query. GraphQL
+    # rejects a whole query when any field in it is invalid, so a schema change
+    # under `variables` would otherwise drop every dashboard. If a batch fails,
+    # retry it without `variables` and stop asking for them for the rest of
+    # this account. Field list checked by live introspection (2026-11-13).
+    local variables_sel='variables {
+          name title type isMultiSelection replacementStrategy
+          defaultValues { value { string } }
+          items { title value }
+          nrqlQuery { accountIds query }
+          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
+        }'
+    local want_variables=1
+
     local all_entities="[]"
     local start=0 batch_num=1
     while [[ $start -lt $guid_count ]]; do
         local guids_literal
         guids_literal=$(echo "$all_guids" | jq ".[${start}:$((start + ENTITY_FETCH_BATCH))]" 2>/dev/null || echo "[]")
 
-        local detail_query
-        detail_query=$(cat <<GRAPHQL
+        local detail_response="" fetched=0 retried_without=0
+        while true; do
+            local sel=""
+            [[ $want_variables -eq 1 ]] && sel="$variables_sel"
+
+            local detail_query
+            detail_query=$(cat <<GRAPHQL
 {
   actor {
     entities(guids: ${guids_literal}) {
       ... on DashboardEntity {
         guid name description accountId createdAt updatedAt permissions
         owner { email userId }
-        variables {
-          name title type isMultiSelection replacementStrategy
-          defaultValues { value { string } }
-          items { title value }
-          nrqlQuery { accountIds query }
-          options { excluded hiddenOnVariablesBar ignoreTimeRange showApplyAction }
-        }
+        ${sel}
         pages {
           guid name description
           widgets {
@@ -618,8 +631,24 @@ GRAPHQL
 }
 GRAPHQL
 )
-        local detail_response
-        detail_response=$(nerdgraph_query "$detail_query")
+            if detail_response=$(nerdgraph_query "$detail_query"); then
+                fetched=1
+                break
+            fi
+            if [[ $want_variables -eq 1 ]]; then
+                log_warn "  [Account $account_id] Dashboard detail query failed with variables — retrying without them; dashboards from here on are exported WITHOUT variable definitions"
+                want_variables=0
+                retried_without=1
+                continue
+            fi
+            break
+        done
+        # Both attempts failed: `variables` was not the cause, so keep asking
+        # for them on the next batch.
+        [[ $fetched -eq 0 && $retried_without -eq 1 ]] && want_variables=1
+        if [[ $fetched -eq 0 ]]; then
+            log_error "  [Account $account_id] Dashboard detail batch $batch_num failed after retries — export is INCOMPLETE"
+        fi
 
         local batch_entities
         batch_entities=$(echo "$detail_response" | jq '[.data.actor.entities[] | select(. != null and .guid != null)]' 2>/dev/null || echo "[]")
@@ -1024,57 +1053,103 @@ GRAPHQL
         sleep "$API_DELAY"
     done
 
-    # Phase 3 — workload definitions. WorkloadEntity carries only metadata; the
-    # definition (entity queries, static members, status rules) lives on the
-    # account's WorkloadCollection. Merged by guid into the converter's shape:
-    # entitySearchQueries [{query}], entityGuids [guid], plus description,
-    # scopeAccounts and statusConfig.
-    if [[ "$guid_count" -gt 0 ]]; then
-        local collections_query
-        collections_query=$(cat <<GRAPHQL
-{
-  actor {
-    account(id: ${account_id}) {
-      workload {
-        collections {
-          guid description
-          entitySearchQueries { query }
-          entities { guid }
-          scopeAccounts { accountIds }
-          statusConfig {
-            automatic {
-              enabled
-              remainingEntitiesRule { rollup { strategy thresholdType thresholdValue } }
-              rules {
-                entitySearchQueries { query }
-                entities { guid }
-                rollup { strategy thresholdType thresholdValue }
-              }
+    # Phase 3 — workload definitions. WorkloadEntity is metadata only; the
+    # membership (entity search queries, static entities) and health rules
+    # live on actor.account(id).workload.collection(guid:). Each batch asks for
+    # its workloads by guid under GraphQL aliases (w0, w1, ...); if a batch
+    # fails, each workload in it is retried on its own so one bad guid cannot
+    # drop the rest. Both collection(guid:) and the list field `collections`
+    # are deprecated in NerdGraph (as of 2026-11-13) in favour of
+    # WorkloadEntity.healthCriteria / collection.definition; moving there
+    # changes the archive shape, so it is a separate change.
+    # Schema traps (checked by live introspection): WorkloadEntity.collection
+    # is an EntityCollection (a different type without these fields);
+    # WorkloadRollup has no groupBy; remainingEntitiesRule's field is `rollup`
+    # (WorkloadRemainingEntitiesRuleRollup, which does have groupBy).
+    if [[ $guid_count -gt 0 ]]; then
+        local coll_sel='guid description
+        entities { guid }
+        entitySearchQueries { id query }
+        scopeAccounts { accountIds }
+        statusConfig {
+          automatic {
+            enabled
+            rules {
+              id
+              entities { guid }
+              entitySearchQueries { id query }
+              rollup { strategy thresholdType thresholdValue }
             }
-            static { description enabled status summary }
+            remainingEntitiesRule {
+              rollup { groupBy strategy thresholdType thresholdValue }
+            }
           }
-        }
-      }
-    }
-  }
-}
-GRAPHQL
-)
-        local collections_response collections
-        if collections_response=$(nerdgraph_query "$collections_query") \
-            && collections=$(echo "$collections_response" | jq -e '.data.actor.account.workload.collections | arrays' 2>/dev/null); then
-            all_workloads=$(jq -n --argjson w "$all_workloads" --argjson c "$collections" '
-                ($c | map({key: .guid, value: .}) | from_entries) as $byGuid
-                | $w | map(. as $e | ($byGuid[$e.guid] // null) as $col
-                    | if $col == null then $e else $e + {
-                        description: $col.description,
-                        entitySearchQueries: ($col.entitySearchQueries // []),
-                        entityGuids: [($col.entities // [])[].guid],
-                        scopeAccounts: $col.scopeAccounts,
-                        statusConfig: $col.statusConfig
-                      } end)' 2>/dev/null || echo "$all_workloads")
+          static { id enabled status summary description }
+        }'
+
+        local defs="[]" defs_failed=0
+        start=0
+        batch_num=1
+        while [[ $start -lt $guid_count ]]; do
+            local batch_guids
+            batch_guids=$(echo "$all_guids" | jq -r ".[${start}:$((start + ENTITY_FETCH_BATCH))][]" 2>/dev/null)
+
+            local aliased="" i=0 g
+            while IFS= read -r g; do
+                [[ -z "$g" ]] && continue
+                aliased="${aliased}
+      w${i}: collection(guid: \"${g}\") { ${coll_sel} }"
+                i=$((i + 1))
+            done <<< "$batch_guids"
+
+            local defs_response batch_defs
+            if defs_response=$(nerdgraph_query "{ actor { account(id: ${account_id}) { workload { ${aliased}
+    } } } }"); then
+                batch_defs=$(echo "$defs_response" | jq '[.data.actor.account.workload // {} | to_entries[] | .value | select(. != null and .guid != null)]' 2>/dev/null || echo "[]")
+                defs=$(json_merge_arrays "$defs" "$batch_defs")
+            else
+                log_warn "  [Account $account_id] Workload definitions batch $batch_num failed — retrying one workload at a time"
+                while IFS= read -r g; do
+                    [[ -z "$g" ]] && continue
+                    sleep "$API_DELAY"
+                    if defs_response=$(nerdgraph_query "{ actor { account(id: ${account_id}) { workload { w0: collection(guid: \"${g}\") { ${coll_sel} } } } } }"); then
+                        batch_defs=$(echo "$defs_response" | jq '[.data.actor.account.workload.w0 | select(. != null and .guid != null)]' 2>/dev/null || echo "[]")
+                        defs=$(json_merge_arrays "$defs" "$batch_defs")
+                    else
+                        defs_failed=$((defs_failed + 1))
+                    fi
+                done <<< "$batch_guids"
+            fi
+
+            start=$((start + ENTITY_FETCH_BATCH))
+            batch_num=$((batch_num + 1))
+            sleep "$API_DELAY"
+        done
+
+        local merged
+        # Both arrays go via stdin, not --argjson (ARG_MAX — see json_merge_arrays).
+        if merged=$(printf '%s\n%s\n' "$all_workloads" "$defs" | jq -s '
+            .[0] as $w | .[1] as $d
+            | (reduce $d[] as $c ({}; .[$c.guid] = $c)) as $by_guid
+            | $w | map(
+                . as $wl
+                | ($by_guid[$wl.guid] // null) as $c
+                | $wl + {
+                    description:         ($c.description // null),
+                    entitySearchQueries: ($c.entitySearchQueries // []),
+                    entityGuids:         ([($c.entities // [])[] | .guid]),
+                    scopeAccounts:       ($c.scopeAccounts // null),
+                    statusConfig:        ($c.statusConfig // null)
+                  }
+              )' 2>/dev/null); then
+            all_workloads="$merged"
+            local unmatched
+            unmatched=$(printf '%s\n%s\n' "$all_workloads" "$defs" \
+                | jq -s '[.[0][].guid] - [.[1][].guid] | length' 2>/dev/null || echo 0)
+            log_debug "    Phase 3 complete: $(echo "$defs" | jq 'length') workload definitions, $unmatched workload(s) without one ($defs_failed failed)"
+            [[ "$unmatched" -gt 0 ]] && log_warn "  [Account $account_id] $unmatched workload(s) exported WITHOUT entity queries or status rules (no definition returned)"
         else
-            log_warn "  [Account $account_id] Workload definitions query failed — workloads exported WITHOUT entity queries or status rules"
+            log_warn "  [Account $account_id] Could not merge workload definitions — workloads exported WITHOUT entity queries or status rules"
         fi
     fi
 
@@ -1280,7 +1355,6 @@ export_ai_workflows() {
     local count
     count=$(jq '.totalCount // (.entities | length) // 0' "$outdir/aiWorkflows.json")
     log_ok "    aiWorkflows: ${count} workflows"
-    echo "$count"
 }
 
 export_ai_destinations() {
@@ -1318,7 +1392,6 @@ export_ai_destinations() {
     local count
     count=$(jq '.totalCount // (.entities | length) // 0' "$outdir/aiNotificationsDestinations.json")
     log_ok "    destinations: ${count}"
-    echo "$count"
 }
 
 export_muting_rules() {
@@ -1364,7 +1437,6 @@ export_muting_rules() {
     local count
     count=$(jq 'length' "$outdir/alertsMutingRules.json" 2>/dev/null || echo 0)
     log_ok "    muting rules: ${count}"
-    echo "$count"
 }
 
 export_drop_rules() {
@@ -1398,7 +1470,6 @@ export_drop_rules() {
     local count
     count=$(jq '.rules | length' "$outdir/nrqlDropRules.json" 2>/dev/null || echo 0)
     log_ok "    drop rules: ${count}"
-    echo "$count"
 }
 
 export_log_configs() {
@@ -1429,7 +1500,6 @@ export_log_configs() {
     local count
     count=$(jq 'length' "$outdir/logConfigurations.json" 2>/dev/null || echo 0)
     log_ok "    parsing rules: ${count}"
-    echo "$count"
 }
 
 export_lookup_tables() {
@@ -1452,7 +1522,6 @@ export_lookup_tables() {
 }
 JSON
     log_warn "    lookup tables: schema fields not introspectable; placeholder pointing at source CSVs"
-    echo "0"
 }
 
 export_events_to_metrics() {
@@ -1483,7 +1552,6 @@ export_events_to_metrics() {
     local count
     count=$(jq '.rules | length' "$outdir/eventsToMetricsRules.json" 2>/dev/null || echo 0)
     log_ok "    E2M rules: ${count}"
-    echo "$count"
 }
 
 export_entity_tags() {
@@ -1522,7 +1590,6 @@ export_entity_tags() {
     local count
     count=$(jq '.count // (.results.entities | length) // 0' "$outdir/entityTags.json" 2>/dev/null || echo 0)
     log_ok "    tagged entities: ${count}"
-    echo "$count"
 }
 
 # =============================================================================
